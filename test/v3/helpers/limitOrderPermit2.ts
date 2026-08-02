@@ -26,6 +26,8 @@ export interface LimitOrderParams {
   outputToken: Address // collateral (e.g. cNGN) the operator buys
   outputAmount: bigint
   recipient: Address
+  additionalValidationContract?: Address
+  additionalValidationData?: Hex
 }
 
 const ZERO: Address = '0x0000000000000000000000000000000000000000'
@@ -66,10 +68,20 @@ const addr = { type: 'address' } as const
 const u256 = { type: 'uint256' } as const
 
 function orderInfoHash(o: LimitOrderParams): Hex {
+  const validationContract = o.additionalValidationContract ?? ZERO
+  const validationData = o.additionalValidationData ?? '0x'
   return keccak256(
     encodeAbiParameters(
       [b32, addr, addr, u256, u256, addr, b32],
-      [ORDER_INFO_TYPE_HASH, o.reactor, o.swapper, o.nonce, o.deadline, ZERO, EMPTY_BYTES_HASH]
+      [
+        ORDER_INFO_TYPE_HASH,
+        o.reactor,
+        o.swapper,
+        o.nonce,
+        o.deadline,
+        validationContract,
+        validationData === '0x' ? EMPTY_BYTES_HASH : keccak256(validationData),
+      ]
     )
   )
 }
@@ -162,6 +174,8 @@ export function encodeLimitOrderWithOutputs(
   o: LimitOrderParams,
   outputs: Output[]
 ): Hex {
+  const validationContract = o.additionalValidationContract ?? ZERO
+  const validationData = o.additionalValidationData ?? '0x'
   return encodeAbiParameters(
     [LIMIT_ORDER_TUPLE],
     [
@@ -171,8 +185,8 @@ export function encodeLimitOrderWithOutputs(
           swapper: o.swapper,
           nonce: o.nonce,
           deadline: o.deadline,
-          additionalValidationContract: ZERO,
-          additionalValidationData: '0x',
+          additionalValidationContract: validationContract,
+          additionalValidationData: validationData,
         },
         input: { token: o.inputToken, amount: o.inputAmount, maxAmount: o.inputAmount },
         outputs,
