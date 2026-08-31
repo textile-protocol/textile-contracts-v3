@@ -11,6 +11,8 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { LimitOrder } from "../../vendor/uniswapx/lib/LimitOrderLib.sol";
 import { OutputToken } from "../../vendor/uniswapx/base/ReactorStructs.sol";
 
+import { FillerConstants } from "../../FillerConstants.sol";
+
 import { IOperatorVault } from "../interfaces/IOperatorVault.sol";
 import { IYieldAdapter } from "../interfaces/IYieldAdapter.sol";
 import { VaultErrors } from "./VaultErrors.sol";
@@ -44,8 +46,6 @@ library VaultPolicy {
 
   uint256 internal constant MAX_MANAGEMENT_FEE_WAD = 1e17;
   uint8 internal constant MAX_TOKEN_DECIMALS = 18;
-  /// @dev Must match `PreferredFillerValidation.MAX_PREFERRED_FILLERS`.
-  uint256 internal constant MAX_PREFERRED_FILLERS = 10;
 
   struct OrderContext {
     address reactor;
@@ -62,7 +62,14 @@ library VaultPolicy {
     bool closeOnly;
   }
 
-  function validateConfig(VaultTypes.VaultConfig memory cfg) external view {
+  /// @return settlementDecimals_ The settlement asset's decimals.
+  /// @return corridorDecimals_ The corridor asset's decimals. Both returned
+  ///         so the constructor does not repeat the external reads.
+  function validateConfig(VaultTypes.VaultConfig memory cfg)
+    external
+    view
+    returns (uint8 settlementDecimals_, uint8 corridorDecimals_)
+  {
     if (
       address(cfg.settlementAsset) == address(0) || address(cfg.corridorAsset) == address(0)
         || cfg.reactor == address(0) || cfg.permit2 == address(0) || cfg.preferredFillerValidation == address(0)
@@ -87,8 +94,8 @@ library VaultPolicy {
     _requireSafeDuration(cfg.valuationTimeout);
     _requireSafeDuration(cfg.riskSignerDelay);
     if (cfg.managementFeeWad > MAX_MANAGEMENT_FEE_WAD) revert VaultErrors.InvalidParams();
-    _requireDecimals(address(cfg.settlementAsset));
-    _requireDecimals(address(cfg.corridorAsset));
+    settlementDecimals_ = _requireDecimals(address(cfg.settlementAsset));
+    corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
   }
 
   /// @notice Bind a freshly cloned adapter to the calling vault and approve it
@@ -158,9 +165,10 @@ library VaultPolicy {
     (address[] memory fillers, uint256 exclusiveUntil) =
       abi.decode(order.info.additionalValidationData, (address[], uint256));
     uint256 count = fillers.length;
-    if (count == 0 || count > MAX_PREFERRED_FILLERS || exclusiveUntil < order.info.deadline) {
-      return false;
-    }
+    if (
+      count == 0 || count > FillerConstants.MAX_PREFERRED_FILLERS
+        || exclusiveUntil < order.info.deadline
+    ) return false;
     for (uint256 i = 0; i < count; ++i) {
       if (fillers[i] == address(0)) return false;
     }
@@ -234,8 +242,8 @@ library VaultPolicy {
     return att.corridorAssetPrice;
   }
 
-  function _requireDecimals(address token) private view {
-    uint8 d = IERC20Metadata(token).decimals();
+  function _requireDecimals(address token) private view returns (uint8 d) {
+    d = IERC20Metadata(token).decimals();
     if (d == 0 || d > MAX_TOKEN_DECIMALS) revert VaultErrors.InvalidDecimals();
   }
 

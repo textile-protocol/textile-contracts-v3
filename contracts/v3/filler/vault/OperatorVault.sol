@@ -3,7 +3,6 @@
 pragma solidity 0.8.30;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
@@ -159,7 +158,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   constructor(VaultTypes.VaultConfig memory cfg) ERC20("Textile Operator Vault", "tOV") {
-    VaultPolicy.validateConfig(cfg);
+    (settlementDecimals, corridorDecimals) = VaultPolicy.validateConfig(cfg);
 
     settlementAsset = cfg.settlementAsset;
     corridorAsset = cfg.corridorAsset;
@@ -183,8 +182,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     riskSignerDelay = cfg.riskSignerDelay;
     minDepositAssets = cfg.minDepositAssets;
     minRedeemShares = cfg.minRedeemShares;
-    settlementDecimals = IERC20Metadata(address(cfg.settlementAsset)).decimals();
-    corridorDecimals = IERC20Metadata(address(cfg.corridorAsset)).decimals();
     yieldAdapter = IYieldAdapter(cfg.yieldAdapter);
     minLiquidSettlement = cfg.minLiquidSettlement;
 
@@ -227,7 +224,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
     requestId = _openOrCurrentDepositEpoch();
     Epoch storage epoch = epochs[requestId];
-    if (block.timestamp >= epoch.cutoff) revert VaultErrors.EpochNotOpen();
 
     _pullExact(settlementAsset, owner, assets);
     pendingSettlement += assets;
@@ -238,6 +234,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   /// @inheritdoc IOperatorVault
+  /// @dev Refunds the controller, not the depositing owner — the ERC-7540
+  ///      controller model (the owner authorises, the controller holds the
+  ///      request rights). Mind this when wiring `owner != controller`.
   function cancelDeposit(uint256 requestId, address controller) external override nonReentrant {
     Epoch storage epoch = epochs[requestId];
     if (!epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
@@ -301,6 +300,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   /// @inheritdoc IOperatorVault
+  /// @dev Races `processDepositEpoch` once `valuationTimeout` elapses:
+  ///      whoever lands first wins. Voiding only refunds depositors their own
+  ///      settlement, so there is no loss either way — size the timeout
+  ///      comfortably past the operator's expected processing window.
   function voidDepositEpoch(uint256 epochId) external override {
     Epoch storage epoch = epochs[epochId];
     if (!epoch.isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
@@ -314,6 +317,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   //////////////////////////////////////////////////////////////*/
 
   /// @inheritdoc IOperatorVault
+  /// @dev Deliberately no pause check, unlike `requestDeposit`: exits must
+  ///      always be able to queue; only new capital is blocked while paused.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     override
@@ -468,6 +473,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     uint256 settlementOut;
     uint256 corridorOut;
     uint256 remaining = epoch.remainingUnits;
+    epoch.remainingUnits = remaining - units;
 
     if (epoch.isDeposit && epoch.state == EpochState.Processed) {
       sharesOut = VaultLib.proRataWithResidue(units, remaining, epoch.shares);
@@ -484,7 +490,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
       if (corridorOut > 0) corridorAsset.safeTransfer(receiver, corridorOut);
     }
 
-    epoch.remainingUnits -= units;
     emit Claimed(controller, receiver, requestId, sharesOut, settlementOut, corridorOut);
   }
 
@@ -636,7 +641,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   /// @inheritdoc IOperatorVault
-  function sweepToken(address token, address to) external override onlyGuardian {
+  function sweepToken(address token, address to) external override onlyGuardian nonReentrant {
     if (to == address(0)) revert VaultErrors.ZeroAddress();
     if (token == address(this) || token == address(settlementAsset) || token == address(corridorAsset)) {
       revert VaultErrors.InvalidPair();
@@ -648,7 +653,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   /// @inheritdoc IOperatorVault
-  function sweepETH(address payable to) external override onlyGuardian {
+  function sweepETH(address payable to) external override onlyGuardian nonReentrant {
     if (to == address(0)) revert VaultErrors.ZeroAddress();
     if (to == address(this)) revert VaultErrors.InvalidParams();
     uint256 amount = address(this).balance;
@@ -732,7 +737,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
   function _openOrCurrentDepositEpoch() private returns (uint256 id) {
     id = currentDepositEpochId;
-    if (id != 0 && epochs[id].state == EpochState.Open) return id;
+    // Past-cutoff epochs are skipped, not returned: deposits open a fresh
+    // epoch instead of bricking until someone calls closeDepositEpoch.
+    if (id != 0 && epochs[id].state == EpochState.Open && block.timestamp < epochs[id].cutoff) {
+      return id;
+    }
     id = nextEpochId++;
     currentDepositEpochId = id;
     uint256 cutoffTs = block.timestamp + depositEpochDuration;
@@ -801,8 +810,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     emit FeeAccrued(feeRecipient, shares, elapsed);
   }
 
+  /// @dev `startedAt` is always a past block timestamp, so the subtraction
+  ///      cannot underflow.
   function _durationElapsed(uint256 startedAt, uint256 duration) private view returns (bool) {
-    return startedAt <= block.timestamp && block.timestamp - startedAt >= duration;
+    return block.timestamp - startedAt >= duration;
   }
 
   function _bumpTradingEpoch() private {
