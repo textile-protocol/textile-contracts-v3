@@ -12,6 +12,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IOperatorVault } from "./interfaces/IOperatorVault.sol";
 import { IOperatorVaultFactory } from "./interfaces/IOperatorVaultFactory.sol";
+import { IYieldAdapter } from "./interfaces/IYieldAdapter.sol";
 import { VaultErrors } from "./libraries/VaultErrors.sol";
 import { VaultLib } from "./libraries/VaultLib.sol";
 import { VaultPolicy } from "./libraries/VaultPolicy.sol";
@@ -74,6 +75,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   uint256 public immutable minRedeemShares;
   uint8 public immutable settlementDecimals;
   uint8 public immutable corridorDecimals;
+  /// @notice Optional idle-yield adapter for the settlement asset. Zero = off.
+  IYieldAdapter public immutable yieldAdapter;
+  /// @notice Liquid settlement floor `allocateIdle` never supplies below.
+  uint256 public immutable minLiquidSettlement;
 
   address public operatorAdmin;
   address public strategySigner;
@@ -180,6 +185,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     minRedeemShares = cfg.minRedeemShares;
     settlementDecimals = IERC20Metadata(address(cfg.settlementAsset)).decimals();
     corridorDecimals = IERC20Metadata(address(cfg.corridorAsset)).decimals();
+    yieldAdapter = IYieldAdapter(cfg.yieldAdapter);
+    minLiquidSettlement = cfg.minLiquidSettlement;
 
     operatorAdmin = cfg.operatorAdmin;
     strategySigner = cfg.strategySigner;
@@ -194,6 +201,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
     cfg.settlementAsset.forceApprove(cfg.permit2, type(uint256).max);
     cfg.corridorAsset.forceApprove(cfg.permit2, type(uint256).max);
+
+    // Bind the freshly cloned adapter in the same factory tx — no front-run
+    // window. Only the settlement asset is ever approved; never the Aave pool.
+    if (cfg.yieldAdapter != address(0)) {
+      VaultPolicy.bindYieldAdapter(cfg.yieldAdapter, cfg.settlementAsset);
+    }
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -345,6 +358,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     if (paused) revert VaultErrors.EnforcedPause();
     Epoch storage epoch = epochs[epochId];
     if (epoch.isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
+    _recallAll();
 
     uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), riskSigner);
     _checkpointFee();
@@ -374,6 +388,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     Epoch storage epoch = epochs[epochId];
     if (epoch.isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
     if (!_durationElapsed(epoch.closedAt, inKindExitTimeout)) revert VaultErrors.TimeoutNotReached();
+    _recallAll();
 
     uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), riskSigner);
     _checkpointFee();
@@ -405,6 +420,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     Epoch storage epoch = epochs[epochId];
     if (epoch.isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
     if (!_durationElapsed(epoch.closedAt, emergencyExitTimeout)) revert VaultErrors.TimeoutNotReached();
+    _recallAll();
 
     _checkpointFee();
     uint256 supply = totalSupply();
@@ -470,6 +486,32 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
     epoch.remainingUnits -= units;
     emit Claimed(controller, receiver, requestId, sharesOut, settlementOut, corridorOut);
+  }
+
+  /*//////////////////////////////////////////////////////////////
+                             IDLE YIELD
+  //////////////////////////////////////////////////////////////*/
+
+  /// @inheritdoc IOperatorVault
+  /// @dev Strict: reverts unless the vault ends with at least `needed` liquid,
+  ///      so an Aave-side shortfall (even 1 wei of rounding) cannot let a fill
+  ///      pull against a short balance.
+  function prepareSettlement(uint256 needed) external override nonReentrant {
+    VaultPolicy.prepareIdle(yieldAdapter, _liquidSettlement(), needed);
+  }
+
+  /// @inheritdoc IOperatorVault
+  /// @dev Only idle settlement above `minLiquidSettlement` is supplied.
+  ///      Pending deposits and reserved payouts are excluded from liquid, so
+  ///      they can never end up in Aave. Corridor is never supplied.
+  function allocateIdle() external override nonReentrant {
+    if (address(yieldAdapter) == address(0)) return;
+    VaultPolicy.allocateIdle(yieldAdapter, _liquidSettlement(), minLiquidSettlement, paused || closeOnly());
+  }
+
+  /// @inheritdoc IOperatorVault
+  function recallAll() external override nonReentrant {
+    _recallAll();
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -650,6 +692,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   /// @inheritdoc IOperatorVault
+  function liquidSettlement() public view override returns (uint256) {
+    return _liquidSettlement();
+  }
+
+  /// @inheritdoc IOperatorVault
   function freeCorridor() public view override returns (uint256) {
     return _freeCorridor();
   }
@@ -774,8 +821,25 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     return Math.mulDiv(attested, shares, supply);
   }
 
-  function _freeSettlement() private view returns (uint256) {
+  /// @dev Settlement actually sitting in the vault, net of pending deposits
+  ///      and reserved payouts. The only balance Permit2 can pull from.
+  function _liquidSettlement() private view returns (uint256) {
     return settlementAsset.balanceOf(address(this)) - pendingSettlement - reservedSettlement;
+  }
+
+  function _heldSettlement() private view returns (uint256) {
+    return address(yieldAdapter) == address(0) ? 0 : yieldAdapter.held();
+  }
+
+  /// @dev Economic free settlement: liquid plus the adapter position. NAV,
+  ///      quotable, and attestation floors all price the full inventory.
+  function _freeSettlement() private view returns (uint256) {
+    return _liquidSettlement() + _heldSettlement();
+  }
+
+  function _recallAll() private {
+    if (address(yieldAdapter) == address(0)) return;
+    VaultPolicy.recallAllIdle(yieldAdapter);
   }
 
   function _freeCorridor() private view returns (uint256) {

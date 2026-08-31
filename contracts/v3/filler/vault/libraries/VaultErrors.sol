@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Textile, Inc.
 pragma solidity 0.8.30;
 
-/// @notice Custom errors for OperatorVault and OperatorVaultFactory.
+/// @notice Custom errors for OperatorVault, OperatorVaultFactory, the yield
+///         adapters, and VaultOrderExecutor.
 library VaultErrors {
   error ZeroAddress();
   error ZeroAmount();
@@ -31,4 +32,8 @@ library VaultErrors {
   error DuplicateVault();
   error AlreadyClaimed();
   error NothingToClaim();
+  error AlreadyInitialized();
+  error YieldNotSupported();
+  error UnknownVault();
+  error UnsupportedOrder();
 }

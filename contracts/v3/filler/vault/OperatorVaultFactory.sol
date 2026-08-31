@@ -2,8 +2,11 @@
 // Copyright (c) 2026 Textile, Inc.
 pragma solidity 0.8.30;
 
+import { Clones } from "@openzeppelin/contracts/proxy/Clones.sol";
+
 import { IOperatorVaultFactory } from "./interfaces/IOperatorVaultFactory.sol";
-import { OperatorVault } from "./OperatorVault.sol";
+import { IYieldAdapter } from "./interfaces/IYieldAdapter.sol";
+import { VaultDeployer } from "./libraries/VaultDeployer.sol";
 import { VaultErrors } from "./libraries/VaultErrors.sol";
 import { VaultTypes } from "./libraries/VaultTypes.sol";
 
@@ -19,6 +22,9 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   address public immutable reactor;
   address public immutable permit2;
   address public immutable preferredFillerValidation;
+  /// @notice Yield adapter implementation cloned per vault. Zero = this
+  ///         factory cannot enable idle yield.
+  address public immutable yieldAdapterImplementation;
 
   mapping(bytes32 => address) private _vaultOf;
   mapping(address => bool) public override isVault;
@@ -39,13 +45,19 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     address corridorAsset
   );
 
-  constructor(address reactor_, address permit2_, address preferredFillerValidation_) {
+  constructor(
+    address reactor_,
+    address permit2_,
+    address preferredFillerValidation_,
+    address yieldAdapterImplementation_
+  ) {
     if (reactor_ == address(0) || permit2_ == address(0) || preferredFillerValidation_ == address(0)) {
       revert VaultErrors.ZeroAddress();
     }
     reactor = reactor_;
     permit2 = permit2_;
     preferredFillerValidation = preferredFillerValidation_;
+    yieldAdapterImplementation = yieldAdapterImplementation_;
   }
 
   /// @inheritdoc IOperatorVaultFactory
@@ -53,6 +65,12 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     if (msg.sender != init.operatorAdmin) revert VaultErrors.NotAuthorized();
     bytes32 key = _key(init.operatorAdmin, address(init.settlementAsset), address(init.corridorAsset));
     if (_vaultOf[key] != address(0)) revert VaultErrors.DuplicateVault();
+
+    address adapter;
+    if (init.enableYield) {
+      if (yieldAdapterImplementation == address(0)) revert VaultErrors.YieldNotSupported();
+      adapter = Clones.clone(yieldAdapterImplementation);
+    }
 
     VaultTypes.VaultConfig memory cfg = VaultTypes.VaultConfig({
       settlementAsset: init.settlementAsset,
@@ -81,10 +99,17 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       riskSignerDelay: init.riskSignerDelay,
       minDepositAssets: init.minDepositAssets,
       minRedeemShares: init.minRedeemShares,
+      yieldAdapter: adapter,
+      minLiquidSettlement: init.minLiquidSettlement,
       version: VERSION
     });
 
-    vault = address(new OperatorVault(cfg));
+    vault = VaultDeployer.deploy(cfg);
+    // Defense in depth: unreachable today (the vault constructor binds the
+    // clone or reverts), but pins the invariant if the constructor changes.
+    if (adapter != address(0) && IYieldAdapter(adapter).vault() != vault) {
+      revert VaultErrors.InvalidParams();
+    }
     _vaultOf[key] = vault;
     isVault[vault] = true;
 

@@ -32,6 +32,8 @@ library VaultTypes {
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
     uint256 minRedeemShares;
+    bool enableYield;
+    uint256 minLiquidSettlement;
   }
 
   /// @notice Full immutable constructor payload.
@@ -62,6 +64,8 @@ library VaultTypes {
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
     uint256 minRedeemShares;
+    address yieldAdapter;
+    uint256 minLiquidSettlement;
     uint256 version;
   }
 }

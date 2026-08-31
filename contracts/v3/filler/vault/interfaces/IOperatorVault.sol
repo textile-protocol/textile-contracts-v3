@@ -15,6 +15,12 @@ import { VaultLib } from "../libraries/VaultLib.sol";
  *         attestation exists.
  */
 interface IOperatorVault {
+  /// @dev Emitted from VaultPolicy delegatecalls, so declared here to keep
+  ///      them in the vault ABI.
+  event SettlementPrepared(uint256 needed, uint256 recalled);
+  event IdleAllocated(uint256 assets);
+  event IdleRecalled(uint256 assets);
+
   function requestDeposit(uint256 assets, address controller, address owner)
     external
     returns (uint256 requestId);
@@ -66,6 +72,29 @@ interface IOperatorVault {
   /// @param to Recipient. Cannot be the zero address or this vault.
   function sweepETH(address payable to) external;
 
+  /// @notice Recall enough settlement from the yield adapter so at least
+  ///         `needed` sits liquid in the vault. No-op when already covered.
+  ///         Reverts with `InsufficientSettlement` when the recall comes up
+  ///         short. Anyone may call; fillers call it before a Permit2 pull.
+  /// @dev Not atomic with a later fill: between a prepare and a direct
+  ///      `reactor.execute`, anyone can call `allocateIdle` and restake the
+  ///      recalled settlement, making the fill revert. That is griefing only —
+  ///      no funds are at risk — and costs the caller gas each block. Fill
+  ///      through `VaultOrderExecutor.fill`, which prepares and executes in
+  ///      one transaction, when that matters.
+  /// @param needed Liquid settlement the caller is about to pull.
+  function prepareSettlement(uint256 needed) external;
+
+  /// @notice Supply idle settlement above `minLiquidSettlement` to the yield
+  ///         adapter. No-op when the adapter is unset, the vault is paused, or
+  ///         close-only. Anyone may call — including between someone else's
+  ///         `prepareSettlement` and their fill (see the note there).
+  function allocateIdle() external;
+
+  /// @notice Recall the full adapter position back to the vault. No-op when
+  ///         nothing is held. Anyone may call; redeem settlement runs it first.
+  function recallAll() external;
+
   function settlementAsset() external view returns (IERC20);
   function corridorAsset() external view returns (IERC20);
   function strategySigner() external view returns (address);
@@ -73,7 +102,12 @@ interface IOperatorVault {
   function tradingEpoch() external view returns (uint256);
   function paused() external view returns (bool);
   function closeOnly() external view returns (bool);
+  /// @notice Economic free settlement: liquid plus the adapter position.
   function freeSettlement() external view returns (uint256);
+  /// @notice Settlement sitting in the vault net of pending and reserved —
+  ///         the only balance Permit2 can pull from. ERC-1271 caps settlement
+  ///         input here; `prepareSettlement` first to count held funds.
+  function liquidSettlement() external view returns (uint256);
   function freeCorridor() external view returns (uint256);
   function quotableSettlement() external view returns (uint256);
   function quotableCorridor() external view returns (uint256);
