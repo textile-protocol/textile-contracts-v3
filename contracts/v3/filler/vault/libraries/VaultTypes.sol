@@ -6,6 +6,23 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Constructor / factory payloads for OperatorVault.
 library VaultTypes {
+  /// @notice Admin, signer, and payout roles. Grouped in one storage struct
+  ///         so the admin lifecycle can live in the linked policy library
+  ///         (external library functions mutate it via delegatecall), keeping
+  ///         the vault runtime under the 24kb cap.
+  struct Roles {
+    address operatorAdmin;
+    address pendingOperatorAdmin;
+    address strategySigner;
+    address riskAdmin;
+    address pendingRiskAdmin;
+    address riskSigner;
+    address pendingRiskSigner;
+    uint256 pendingRiskSignerAt;
+    address guardian;
+    address feeRecipient;
+  }
+
   /// @notice Caller-supplied vault configuration. Factory fills reactor, Permit2,
   ///         PreferredFillerValidation, and implementation version.
   struct VaultInit {
@@ -19,6 +36,8 @@ library VaultTypes {
     address feeRecipient;
     uint256 maxOrderInputSettlement;
     uint256 maxOrderInputCorridor;
+    uint256 minFillPriceWad;
+    uint256 maxFillPriceWad;
     uint256 minReserveSettlement;
     uint256 minReserveCorridor;
     uint256 maxOrderLifetime;
@@ -51,6 +70,8 @@ library VaultTypes {
     address feeRecipient;
     uint256 maxOrderInputSettlement;
     uint256 maxOrderInputCorridor;
+    uint256 minFillPriceWad;
+    uint256 maxFillPriceWad;
     uint256 minReserveSettlement;
     uint256 minReserveCorridor;
     uint256 maxOrderLifetime;

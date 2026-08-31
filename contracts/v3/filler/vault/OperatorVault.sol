@@ -3,11 +3,9 @@
 pragma solidity 0.8.30;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
-import { Address } from "@openzeppelin/contracts/utils/Address.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IOperatorVault } from "./interfaces/IOperatorVault.sol";
@@ -58,9 +56,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   address public immutable reactor;
   address public immutable permit2;
   address public immutable preferredFillerValidation;
-  uint256 public immutable version;
   uint256 public immutable maxOrderInputSettlement;
   uint256 public immutable maxOrderInputCorridor;
+  /// @notice Fill-price band, packed `min << 128 | max`: WAD-scaled
+  ///         settlement per corridor token, same convention as the NAV
+  ///         attestation price. Orders priced outside the band fail ERC-1271
+  ///         even with both signatures — the on-chain economic backstop
+  ///         behind the infinite Permit2 approval. Packed into one immutable
+  ///         to keep the creation bytecode under the 24kb cap.
+  uint256 public immutable fillPriceBand;
   uint256 public immutable minReserveSettlement;
   uint256 public immutable minReserveCorridor;
   uint256 public immutable maxOrderLifetime;
@@ -85,14 +89,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   ///         the underlying cannot be recalled.
   address public immutable yieldToken;
 
-  address public operatorAdmin;
-  address public strategySigner;
-  address public riskAdmin;
-  address public riskSigner;
-  address public pendingRiskSigner;
-  uint256 public pendingRiskSignerAt;
-  address public guardian;
-  address public feeRecipient;
+  /// @dev Admin lifecycle logic lives in VaultPolicy (delegatecalled); the
+  ///      struct grouping is what lets the library write these slots.
+  VaultTypes.Roles private _roles;
 
   bool public override paused;
   uint256 public override tradingEpoch;
@@ -139,36 +138,28 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   );
   event Paused(address indexed guardian);
   event Unpaused(address indexed guardian);
-  event StrategySignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
-  event RiskSignerProposed(address indexed pending, uint256 applyAt);
-  event RiskSignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
-  event OperatorAdminTransferred(address indexed previous, address indexed current);
-  event RiskAdminTransferred(address indexed previous, address indexed current);
-  event GuardianUpdated(address indexed previous, address indexed current);
   event FeeRecipientUpdated(address indexed previous, address indexed current);
   event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
   event NavSettled(uint256 nav, uint256 timestamp);
   event OperatorSet(address indexed account, address indexed operator, bool approved);
-  event TokenSwept(address indexed token, address indexed to, uint256 amount);
-  event ETHSwept(address indexed to, uint256 amount);
 
   modifier onlyOperatorAdmin() {
-    if (msg.sender != operatorAdmin) revert VaultErrors.NotAuthorized();
+    if (msg.sender != _roles.operatorAdmin) revert VaultErrors.NotAuthorized();
     _;
   }
 
   modifier onlyRiskAdmin() {
-    if (msg.sender != riskAdmin) revert VaultErrors.NotAuthorized();
+    if (msg.sender != _roles.riskAdmin) revert VaultErrors.NotAuthorized();
     _;
   }
 
   modifier onlyGuardian() {
-    if (msg.sender != guardian) revert VaultErrors.NotAuthorized();
+    if (msg.sender != _roles.guardian) revert VaultErrors.NotAuthorized();
     _;
   }
 
   constructor(VaultTypes.VaultConfig memory cfg) ERC20("Textile Operator Vault", "tOV") {
-    VaultPolicy.validateConfig(cfg);
+    (settlementDecimals, corridorDecimals) = VaultPolicy.validateConfig(cfg);
 
     settlementAsset = cfg.settlementAsset;
     corridorAsset = cfg.corridorAsset;
@@ -176,9 +167,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     reactor = cfg.reactor;
     permit2 = cfg.permit2;
     preferredFillerValidation = cfg.preferredFillerValidation;
-    version = cfg.version;
     maxOrderInputSettlement = cfg.maxOrderInputSettlement;
     maxOrderInputCorridor = cfg.maxOrderInputCorridor;
+    fillPriceBand = (cfg.minFillPriceWad << 128) | cfg.maxFillPriceWad;
     minReserveSettlement = cfg.minReserveSettlement;
     minReserveCorridor = cfg.minReserveCorridor;
     maxOrderLifetime = cfg.maxOrderLifetime;
@@ -192,17 +183,18 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     riskSignerDelay = cfg.riskSignerDelay;
     minDepositAssets = cfg.minDepositAssets;
     minRedeemShares = cfg.minRedeemShares;
-    settlementDecimals = IERC20Metadata(address(cfg.settlementAsset)).decimals();
-    corridorDecimals = IERC20Metadata(address(cfg.corridorAsset)).decimals();
     yieldAdapter = IYieldAdapter(cfg.yieldAdapter);
     minLiquidSettlement = cfg.minLiquidSettlement;
 
-    operatorAdmin = cfg.operatorAdmin;
-    strategySigner = cfg.strategySigner;
-    riskAdmin = cfg.riskAdmin;
-    riskSigner = cfg.riskSigner;
-    guardian = cfg.guardian;
-    feeRecipient = cfg.feeRecipient;
+    VaultPolicy.initRoles(
+      _roles,
+      cfg.operatorAdmin,
+      cfg.strategySigner,
+      cfg.riskAdmin,
+      cfg.riskSigner,
+      cfg.guardian,
+      cfg.feeRecipient
+    );
 
     tradingEpoch = 1;
     nextEpochId = 1;
@@ -236,7 +228,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
     requestId = _openOrCurrentDepositEpoch();
     Epoch storage epoch = epochs[requestId];
-    if (block.timestamp >= epoch.cutoff) revert VaultErrors.EpochNotOpen();
 
     _pullExact(settlementAsset, owner, assets);
     pendingSettlement += assets;
@@ -247,6 +238,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   /// @inheritdoc IOperatorVault
+  /// @dev Refunds the controller, not the depositing owner — the ERC-7540
+  ///      controller model (the owner authorises, the controller holds the
+  ///      request rights). Mind this when wiring `owner != controller`.
   function cancelDeposit(uint256 requestId, address controller) external override nonReentrant {
     Epoch storage epoch = epochs[requestId];
     if (!epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
@@ -290,7 +284,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
       return;
     }
 
-    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), riskSigner);
+    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
     _checkpointFee();
 
     uint256 supply = totalSupply();
@@ -310,6 +304,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   /// @inheritdoc IOperatorVault
+  /// @dev Races `processDepositEpoch` once `valuationTimeout` elapses:
+  ///      whoever lands first wins. Voiding only refunds depositors their own
+  ///      settlement, so there is no loss either way — size the timeout
+  ///      comfortably past the operator's expected processing window.
   function voidDepositEpoch(uint256 epochId) external override {
     Epoch storage epoch = epochs[epochId];
     if (!epoch.isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
@@ -323,6 +321,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   //////////////////////////////////////////////////////////////*/
 
   /// @inheritdoc IOperatorVault
+  /// @dev Deliberately no pause check, unlike `requestDeposit`: exits must
+  ///      always be able to queue; only new capital is blocked while paused.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     override
@@ -369,7 +369,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     if (epoch.isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
     _recallAll();
 
-    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), riskSigner);
+    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
     _checkpointFee();
 
     uint256 supply = totalSupply();
@@ -399,7 +399,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     if (!_durationElapsed(epoch.closedAt, inKindExitTimeout)) revert VaultErrors.TimeoutNotReached();
     _recallAll();
 
-    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), riskSigner);
+    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
     _checkpointFee();
     uint256 supply = totalSupply();
     (, uint256 freeS, uint256 freeC) = _requireLiveNav(attestation, price);
@@ -484,6 +484,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     uint256 settlementOut;
     uint256 corridorOut;
     uint256 remaining = epoch.remainingUnits;
+    epoch.remainingUnits = remaining - units;
 
     if (epoch.isDeposit && epoch.state == EpochState.Processed) {
       sharesOut = VaultLib.proRataWithResidue(units, remaining, epoch.shares);
@@ -506,7 +507,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
       }
     }
 
-    epoch.remainingUnits -= units;
     emit Claimed(controller, receiver, requestId, sharesOut, settlementOut, corridorOut);
   }
 
@@ -609,90 +609,65 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   function setStrategySigner(address next) external onlyOperatorAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    if (next == riskSigner || next == pendingRiskSigner) revert VaultErrors.InvalidParams();
-    address previous = strategySigner;
-    strategySigner = next;
     _bumpTradingEpoch();
-    emit StrategySignerRotated(previous, next, tradingEpoch);
+    VaultPolicy.setStrategySigner(_roles, next, tradingEpoch);
   }
 
   function proposeRiskSigner(address next) external onlyRiskAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    if (next == strategySigner) revert VaultErrors.InvalidParams();
-    pendingRiskSigner = next;
-    pendingRiskSignerAt = block.timestamp + riskSignerDelay;
-    emit RiskSignerProposed(next, pendingRiskSignerAt);
+    VaultPolicy.proposeRiskSigner(_roles, next, riskSignerDelay);
   }
 
   function acceptRiskSigner() external {
-    if (pendingRiskSigner == address(0)) revert VaultErrors.InvalidParams();
-    if (pendingRiskSigner == strategySigner) revert VaultErrors.InvalidParams();
-    if (block.timestamp < pendingRiskSignerAt) revert VaultErrors.RotationDelayPending();
-    address previous = riskSigner;
-    address next = pendingRiskSigner;
-    riskSigner = next;
-    pendingRiskSigner = address(0);
-    pendingRiskSignerAt = 0;
     _bumpTradingEpoch();
-    emit RiskSignerRotated(previous, next, tradingEpoch);
+    VaultPolicy.acceptRiskSigner(_roles, tradingEpoch);
   }
 
+  /// @notice Withdraw a pending risk-signer proposal so a third party cannot
+  ///         activate it via `acceptRiskSigner` once the delay elapses.
+  function cancelRiskSigner() external onlyRiskAdmin {
+    VaultPolicy.cancelRiskSigner(_roles);
+  }
+
+  /// @notice Two-step transfer: the new admin must accept, so a fat-finger or
+  ///         hostile proposal cannot hand control over irrevocably.
   function transferOperatorAdmin(address next) external onlyOperatorAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    address previous = operatorAdmin;
-    if (next == previous) revert VaultErrors.InvalidParams();
-    IOperatorVaultFactory(factory).rekeyOperator(
-      previous, next, address(settlementAsset), address(corridorAsset)
+    VaultPolicy.proposeOperatorAdmin(_roles, next);
+  }
+
+  function acceptOperatorAdmin() external {
+    VaultPolicy.acceptOperatorAdmin(
+      _roles, factory, address(settlementAsset), address(corridorAsset)
     );
-    operatorAdmin = next;
-    emit OperatorAdminTransferred(previous, next);
   }
 
+  /// @notice Two-step transfer, mirroring `transferOperatorAdmin`.
   function transferRiskAdmin(address next) external onlyRiskAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    pendingRiskSigner = address(0);
-    pendingRiskSignerAt = 0;
-    emit RiskAdminTransferred(riskAdmin, next);
-    riskAdmin = next;
+    VaultPolicy.proposeRiskAdmin(_roles, next);
+  }
+
+  function acceptRiskAdmin() external {
+    VaultPolicy.acceptRiskAdmin(_roles);
   }
 
   /// @inheritdoc IOperatorVault
-  function sweepToken(address token, address to) external override onlyGuardian {
-    if (to == address(0)) revert VaultErrors.ZeroAddress();
-    // yieldToken is zero when yield is off; sweeping token(0) is nonsense
-    // either way, so the fourth comparison needs no zero-guard.
-    if (
-      token == address(this) || token == address(settlementAsset) || token == address(corridorAsset)
-        || token == yieldToken
-    ) revert VaultErrors.InvalidPair();
-    uint256 amount = IERC20(token).balanceOf(address(this));
-    if (amount == 0) revert VaultErrors.ZeroAmount();
-    IERC20(token).safeTransfer(to, amount);
-    emit TokenSwept(token, to, amount);
+  function sweepToken(address token, address to) external override onlyGuardian nonReentrant {
+    VaultPolicy.sweepToken(token, to, address(settlementAsset), address(corridorAsset), yieldToken);
   }
 
   /// @inheritdoc IOperatorVault
-  function sweepETH(address payable to) external override onlyGuardian {
-    if (to == address(0)) revert VaultErrors.ZeroAddress();
-    if (to == address(this)) revert VaultErrors.InvalidParams();
-    uint256 amount = address(this).balance;
-    if (amount == 0) revert VaultErrors.ZeroAmount();
-    Address.sendValue(to, amount);
-    emit ETHSwept(to, amount);
+  function sweepETH(address payable to) external override onlyGuardian nonReentrant {
+    VaultPolicy.sweepETH(to);
   }
 
   function setGuardian(address next) external onlyOperatorAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    emit GuardianUpdated(guardian, next);
-    guardian = next;
+    VaultPolicy.setGuardian(_roles, next);
   }
 
   function setFeeRecipient(address next) external onlyOperatorAdmin nonReentrant {
     if (next == address(0)) revert VaultErrors.ZeroAddress();
     _checkpointFee();
-    emit FeeRecipientUpdated(feeRecipient, next);
-    feeRecipient = next;
+    emit FeeRecipientUpdated(_roles.feeRecipient, next);
+    _roles.feeRecipient = next;
   }
 
   function setOperator(address operator, bool approved) external override returns (bool) {
@@ -705,6 +680,46 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   /*//////////////////////////////////////////////////////////////
                                 VIEWS
   //////////////////////////////////////////////////////////////*/
+
+  function operatorAdmin() public view returns (address) {
+    return _roles.operatorAdmin;
+  }
+
+  function pendingOperatorAdmin() external view returns (address) {
+    return _roles.pendingOperatorAdmin;
+  }
+
+  function strategySigner() public view override returns (address) {
+    return _roles.strategySigner;
+  }
+
+  function riskAdmin() public view returns (address) {
+    return _roles.riskAdmin;
+  }
+
+  function pendingRiskAdmin() external view returns (address) {
+    return _roles.pendingRiskAdmin;
+  }
+
+  function riskSigner() public view override returns (address) {
+    return _roles.riskSigner;
+  }
+
+  function pendingRiskSigner() external view returns (address) {
+    return _roles.pendingRiskSigner;
+  }
+
+  function pendingRiskSignerAt() external view returns (uint256) {
+    return _roles.pendingRiskSignerAt;
+  }
+
+  function guardian() public view returns (address) {
+    return _roles.guardian;
+  }
+
+  function feeRecipient() public view returns (address) {
+    return _roles.feeRecipient;
+  }
 
   /// @inheritdoc IOperatorVault
   function closeOnly() public view override returns (bool) {
@@ -742,10 +757,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     return lastSettledNav;
   }
 
-  function asset() external view returns (address) {
-    return address(settlementAsset);
-  }
-
   /// @notice Share units track settlement atomic units, so decimals match the asset.
   function decimals() public view override returns (uint8) {
     return settlementDecimals;
@@ -757,7 +768,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
   function _openOrCurrentDepositEpoch() private returns (uint256 id) {
     id = currentDepositEpochId;
-    if (id != 0 && epochs[id].state == EpochState.Open) return id;
+    // Past-cutoff epochs are skipped, not returned: deposits open a fresh
+    // epoch instead of bricking until someone calls closeDepositEpoch.
+    if (id != 0 && epochs[id].state == EpochState.Open && block.timestamp < epochs[id].cutoff) {
+      return id;
+    }
     id = nextEpochId++;
     currentDepositEpochId = id;
     uint256 cutoffTs = block.timestamp + depositEpochDuration;
@@ -826,12 +841,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     lastFeeCheckpoint = block.timestamp;
     uint256 shares = VaultLib.feeShares(totalSupply(), managementFeeWad, elapsed);
     if (shares == 0) return;
-    _mint(feeRecipient, shares);
-    emit FeeAccrued(feeRecipient, shares, elapsed);
+    address recipient = _roles.feeRecipient;
+    _mint(recipient, shares);
+    emit FeeAccrued(recipient, shares, elapsed);
   }
 
+  /// @dev `startedAt` is always a past block timestamp, so the subtraction
+  ///      cannot underflow.
   function _durationElapsed(uint256 startedAt, uint256 duration) private view returns (bool) {
-    return startedAt <= block.timestamp && block.timestamp - startedAt >= duration;
+    return block.timestamp - startedAt >= duration;
   }
 
   function _bumpTradingEpoch() private {

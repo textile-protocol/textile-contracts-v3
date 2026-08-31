@@ -32,6 +32,7 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   event Deployed(uint256 assets);
   event Recalled(uint256 requested, uint256 withdrawn);
   event HeldTransferred(address indexed to, uint256 assets);
+  event Skimmed(address indexed token, uint256 amount);
 
   modifier onlyVault() {
     if (msg.sender != vault) revert VaultErrors.NotAuthorized();
@@ -77,6 +78,10 @@ contract AaveV3YieldAdapter is IYieldAdapter {
 
   /// @inheritdoc IYieldAdapter
   /// @dev aToken `balanceOf` is index-scaled, so interest is already included.
+  ///      Face value (audit I-01): this cannot see an Aave impairment — if
+  ///      aTokens trade below par, `held()`, live NAV, and the attestation
+  ///      floors are all inflated together. Marking Aave risk down is the
+  ///      risk signer's job via the attested NAV, not this adapter's.
   function held() external view override returns (uint256) {
     return aToken.balanceOf(address(this));
   }
@@ -91,5 +96,18 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   function transferHeld(address to, uint256 assets) external override onlyVault {
     aToken.safeTransfer(to, assets);
     emit HeldTransferred(to, assets);
+  }
+
+  /// @notice Recover a token force-sent to the adapter by pushing it to the
+  ///         vault. Permissionless on purpose: the destination is fixed, so
+  ///         the call can only move value into the vault — underlying is
+  ///         socialised there, junk becomes guardian-sweepable — and the
+  ///         adapter stays owner-free. The position itself is never skimmable.
+  function skim(address token) external {
+    if (token == address(aToken)) revert VaultErrors.InvalidPair();
+    uint256 amount = IERC20(token).balanceOf(address(this));
+    if (amount == 0) revert VaultErrors.ZeroAmount();
+    IERC20(token).safeTransfer(vault, amount);
+    emit Skimmed(token, amount);
   }
 }

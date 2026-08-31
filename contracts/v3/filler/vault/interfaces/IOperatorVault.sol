@@ -13,6 +13,23 @@ import { VaultLib } from "../libraries/VaultLib.sol";
  *         ERC-7540 `deposit`/`mint`/`withdraw`/`redeem` are not implemented.
  *         Preview methods revert — there is no honest preview until an
  *         attestation exists.
+ * @dev Not drop-in ERC-4626 (audit I-02): `preview*` revert, `totalAssets()`
+ *      returns the last settled NAV (a stale mark, not a live value), and
+ *      share price comes from risk-signer attestations. Integrate through
+ *      the request/claim flow, never through 4626 conversion helpers.
+ *
+ *      Token assumptions (audit L-04): both assets must be standard ERC-20s
+ *      with 1–18 decimals — no rebasing, no fee-on-transfer, no reentrant
+ *      hooks. `_pullExact` rejects fee-on-transfer deposits, but a rebasing
+ *      settlement asset silently desynchronises the pending/reserved
+ *      accounting. Deploy vaults only for vetted, allowlisted assets.
+ *
+ *      Zero-NAV edge (audit I-04): attesting `nav == 0` while shares are
+ *      outstanding makes the next processed deposit mint essentially the
+ *      whole vault (correct for a total-loss reset, catastrophic otherwise).
+ *      The live-NAV floor makes this reachable only in a genuine total-loss
+ *      state; the risk signer must not attest zero NAV with non-zero supply
+ *      unless a full reset is intended.
  */
 interface IOperatorVault {
   /// @dev Emitted from VaultPolicy delegatecalls, so declared here to keep
@@ -20,6 +37,17 @@ interface IOperatorVault {
   event SettlementPrepared(uint256 needed, uint256 recalled);
   event IdleAllocated(uint256 assets);
   event IdleRecalled(uint256 assets);
+  event StrategySignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
+  event RiskSignerProposed(address indexed pending, uint256 applyAt);
+  event RiskSignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
+  event RiskSignerProposalCancelled(address indexed cancelled);
+  event OperatorAdminProposed(address indexed pending);
+  event OperatorAdminTransferred(address indexed previous, address indexed current);
+  event RiskAdminProposed(address indexed pending);
+  event RiskAdminTransferred(address indexed previous, address indexed current);
+  event GuardianUpdated(address indexed previous, address indexed current);
+  event TokenSwept(address indexed token, address indexed to, uint256 amount);
+  event ETHSwept(address indexed to, uint256 amount);
 
   function requestDeposit(uint256 assets, address controller, address owner)
     external

@@ -195,33 +195,28 @@ describe('SellFirstFeeController', () => {
     ])
   })
 
-  it('rejects a nonzero output whose 3 bps fee would round to zero', async () => {
+  it('skips the fee leg when the 3 bps fee rounds to zero', async () => {
     const { controller, reactor, operator, usdt, cngn } = await deploy()
     const token = await cngn.getAddress()
-    await expect(
-      controller.getFeeOutputs({
-        info: {
-          reactor: await reactor.getAddress(),
-          swapper: await operator.getAddress(),
-          nonce: 1n,
-          deadline: 2n,
-          additionalValidationContract: ethers.ZeroAddress,
-          additionalValidationData: '0x',
-        },
-        input: {
-          token: await usdt.getAddress(),
-          amount: INPUT_USDT,
-          maxAmount: INPUT_USDT,
-        },
-        outputs: [
-          { token, amount: 1_999n, recipient: await operator.getAddress() },
-        ],
-        sig: '0x',
-        hash: ethers.ZeroHash,
-      })
-    )
-      .to.be.revertedWithCustomError(controller, 'FeeRoundsToZero')
-      .withArgs(token, 1_999n)
+    const feeOutputs = await controller.getFeeOutputs({
+      info: {
+        reactor: await reactor.getAddress(),
+        swapper: await operator.getAddress(),
+        nonce: 1n,
+        deadline: 2n,
+        additionalValidationContract: ethers.ZeroAddress,
+        additionalValidationData: '0x',
+      },
+      input: {
+        token: await usdt.getAddress(),
+        amount: INPUT_USDT,
+        maxAmount: INPUT_USDT,
+      },
+      outputs: [{ token, amount: 1_999n, recipient: await operator.getAddress() }],
+      sig: '0x',
+      hash: ethers.ZeroHash,
+    })
+    expect(feeOutputs).to.deep.equal([])
   })
 
   it('charges 3 bps through the reactor native ProtocolFees hook', async () => {

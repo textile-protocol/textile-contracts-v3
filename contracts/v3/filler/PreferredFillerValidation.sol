@@ -6,6 +6,8 @@ pragma solidity 0.8.30;
 import { ResolvedOrder } from "./vendor/uniswapx/base/ReactorStructs.sol";
 import { IValidationCallback } from "./vendor/uniswapx/interfaces/IValidationCallback.sol";
 
+import { FillerConstants } from "./FillerConstants.sol";
+
 /**
  * @title PreferredFillerValidation
  * @notice Gives a bounded set of filler wallets exclusive access to an order
@@ -15,7 +17,7 @@ import { IValidationCallback } from "./vendor/uniswapx/interfaces/IValidationCal
  *      already covered by the maker's Permit2 witness signature.
  */
 contract PreferredFillerValidation is IValidationCallback {
-  uint256 public constant MAX_PREFERRED_FILLERS = 10;
+  uint256 public constant MAX_PREFERRED_FILLERS = FillerConstants.MAX_PREFERRED_FILLERS;
 
   error InvalidCaller(address caller);
   error InvalidPreferredFillerCount(uint256 count);
