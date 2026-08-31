@@ -18,17 +18,11 @@ contract SellFirstFeeControllerAuditFindingsTest is Test {
         controller = new SellFirstFeeController(RECIPIENT, 5);
     }
 
-    /// @dev Supersedes the report-5 I-02 revert behaviour: OperatorVault
-    ///      audit L-05 flagged the revert as a hot-path liveness footgun, so a
-    ///      zero-rounding fee now skips the fee leg. Fee integrity holds
-    ///      because fees are computed on the merged per-token total (see
-    ///      testAuditFixed_DuplicateTokenOutputsAggregateBeforeDustCheck).
-    function testAuditFixed_DustOutputSkipsFeeLeg() public view {
+    function testAuditFixed_DustOutputCannotExecuteFeeFree() public {
         ResolvedOrder memory order = _order(TOKEN, 1_999);
 
-        OutputToken[] memory fees = controller.getFeeOutputs(order);
-
-        assertEq(fees.length, 0, "dust output must settle with no fee leg");
+        vm.expectRevert(abi.encodeWithSelector(SellFirstFeeController.FeeRoundsToZero.selector, TOKEN, 1_999));
+        controller.getFeeOutputs(order);
     }
 
     function testAuditFixed_MinimumFeeableOutputPaysOneAtomicUnit() public view {

@@ -86,8 +86,6 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       feeRecipient: init.feeRecipient,
       maxOrderInputSettlement: init.maxOrderInputSettlement,
       maxOrderInputCorridor: init.maxOrderInputCorridor,
-      minFillPriceWad: init.minFillPriceWad,
-      maxFillPriceWad: init.maxFillPriceWad,
       minReserveSettlement: init.minReserveSettlement,
       minReserveCorridor: init.minReserveCorridor,
       maxOrderLifetime: init.maxOrderLifetime,

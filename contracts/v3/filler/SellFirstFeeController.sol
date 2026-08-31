@@ -27,6 +27,7 @@ contract SellFirstFeeController is IProtocolFeeController {
 
   error ZeroAddress();
   error InvalidFeeBps(uint256 feeBps);
+  error FeeRoundsToZero(address token, uint256 amount);
 
   constructor(address feeRecipient_, uint256 feeBps_) {
     if (feeRecipient_ == address(0)) revert ZeroAddress();
@@ -61,11 +62,7 @@ contract SellFirstFeeController is IProtocolFeeController {
     for (uint256 i = 0; i < tokenCount; ++i) {
       OutputToken memory output = feeOutputs[i];
       uint256 fee = (output.amount * FEE_BPS) / BPS;
-      // The reactor calls this hook on every fill, so a fee that rounds to
-      // zero skips the fee leg instead of reverting the settlement. Fees are
-      // computed on the merged per-token total above, so an order cannot be
-      // split into same-token dust outputs to dodge the fee.
-      if (fee == 0) continue;
+      if (fee == 0) revert FeeRoundsToZero(output.token, output.amount);
       feeOutputs[feeOutputsLength++] = OutputToken({ token: output.token, amount: fee, recipient: feeRecipient });
     }
 
