@@ -59,11 +59,16 @@ interface IOperatorVault {
   ///         including unattested surplus. Anyone may call. Attested in-kind
   ///         while paused also pays live, so a hostile risk key cannot
   ///         pre-settle a partial epoch at zero and block this path.
+  ///         The adapter recall is best-effort: a position Aave cannot pay
+  ///         back is distributed pro-rata as the yield token itself, so an
+  ///         impaired external protocol cannot block this exit.
   /// @param epochId Closed redeem epoch to settle.
   function settleRedeemEmergencyInKind(uint256 epochId) external;
 
   /// @notice Guardian-only sweep of a non-working ERC-20. Reverts for the
-  ///         vault share token, settlement asset, and corridor asset.
+  ///         vault share token, settlement asset, corridor asset, and yield
+  ///         token (the vault holds yield tokens for redeemers after an
+  ///         emergency exit under an impaired external protocol).
   /// @param token Token to transfer. Must not be a working asset.
   /// @param to Recipient. Cannot be the zero address.
   function sweepToken(address token, address to) external;

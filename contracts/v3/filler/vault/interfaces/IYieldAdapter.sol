@@ -19,6 +19,10 @@ interface IYieldAdapter {
   /// @notice Current position value in underlying units, interest included.
   function held() external view returns (uint256);
 
+  /// @notice Token the position is held in (e.g. the aToken). Redeemable
+  ///         one-to-one for the underlying at the external protocol.
+  function yieldToken() external view returns (address);
+
   /// @notice One-time binding, called by the vault from its constructor.
   /// @param vault_ Vault to bind. Must be the caller.
   /// @param asset_ Underlying asset to deploy.
@@ -32,4 +36,11 @@ interface IYieldAdapter {
   /// @param assets Underlying amount, or `type(uint256).max` for everything.
   /// @return withdrawn Underlying amount actually sent to the vault.
   function recall(uint256 assets) external returns (uint256 withdrawn);
+
+  /// @notice Transfer part of the position out as the yield token itself,
+  ///         without touching the external protocol. Vault only. Used by the
+  ///         emergency exit when the underlying cannot be withdrawn.
+  /// @param to Recipient of the yield tokens.
+  /// @param assets Position amount in underlying units.
+  function transferHeld(address to, uint256 assets) external;
 }

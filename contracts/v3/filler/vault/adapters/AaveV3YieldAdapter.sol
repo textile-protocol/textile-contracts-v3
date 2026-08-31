@@ -31,6 +31,7 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   event AdapterInitialized(address indexed vault, address indexed asset, address indexed aToken);
   event Deployed(uint256 assets);
   event Recalled(uint256 requested, uint256 withdrawn);
+  event HeldTransferred(address indexed to, uint256 assets);
 
   modifier onlyVault() {
     if (msg.sender != vault) revert VaultErrors.NotAuthorized();
@@ -78,5 +79,17 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   /// @dev aToken `balanceOf` is index-scaled, so interest is already included.
   function held() external view override returns (uint256) {
     return aToken.balanceOf(address(this));
+  }
+
+  /// @inheritdoc IYieldAdapter
+  function yieldToken() external view override returns (address) {
+    return address(aToken);
+  }
+
+  /// @inheritdoc IYieldAdapter
+  /// @dev aTokens transfer at face value, so `assets` is also the aToken amount.
+  function transferHeld(address to, uint256 assets) external override onlyVault {
+    aToken.safeTransfer(to, assets);
+    emit HeldTransferred(to, assets);
   }
 }

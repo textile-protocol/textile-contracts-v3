@@ -49,6 +49,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     uint256 remainingUnits;
     uint256 remainingSettlement;
     uint256 remainingCorridor;
+    uint256 remainingYield;
   }
 
   IERC20 public immutable override settlementAsset;
@@ -79,6 +80,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   IYieldAdapter public immutable yieldAdapter;
   /// @notice Liquid settlement floor `allocateIdle` never supplies below.
   uint256 public immutable minLiquidSettlement;
+  /// @notice Token the adapter position is held in (e.g. the aToken). Zero
+  ///         when yield is off. Paid out in kind by the emergency exit when
+  ///         the underlying cannot be recalled.
+  address public immutable yieldToken;
 
   address public operatorAdmin;
   address public strategySigner;
@@ -119,6 +124,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   event DepositEpochVoided(uint256 indexed epochId);
   event RedeemEpochSettled(
     uint256 indexed epochId, bool inKind, uint256 shares, uint256 settlementOut, uint256 corridorOut
+  );
+  event RedeemYieldSettled(uint256 indexed epochId, uint256 yieldOut);
+  event ClaimedYield(
+    address indexed controller, address indexed receiver, uint256 indexed epochId, uint256 yieldOut
   );
   event Claimed(
     address indexed controller,
@@ -204,9 +213,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
     // Bind the freshly cloned adapter in the same factory tx — no front-run
     // window. Only the settlement asset is ever approved; never the Aave pool.
-    if (cfg.yieldAdapter != address(0)) {
-      VaultPolicy.bindYieldAdapter(cfg.yieldAdapter, cfg.settlementAsset);
-    }
+    yieldToken = cfg.yieldAdapter == address(0)
+      ? address(0)
+      : VaultPolicy.bindYieldAdapter(cfg.yieldAdapter, cfg.settlementAsset);
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -376,7 +385,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     }
     if (freeS < settlementOut) revert VaultErrors.InsufficientSettlement();
 
-    _finishRedeemSettle(epochId, epoch, false, settlementOut, 0, price);
+    _finishRedeemSettle(epochId, epoch, false, settlementOut, 0, 0, price);
   }
 
   /// @inheritdoc IOperatorVault
@@ -408,29 +417,36 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     uint256 floorC = paused ? freeC : attestation.freeCorridor;
     uint256 settlementOut = _inKindLeg(shares, supply, floorS, freeS);
     uint256 corridorOut = _inKindLeg(shares, supply, floorC, freeC);
-    _finishRedeemSettle(epochId, epoch, true, settlementOut, corridorOut, price);
+    _finishRedeemSettle(epochId, epoch, true, settlementOut, corridorOut, 0, price);
   }
 
   /// @inheritdoc IOperatorVault
   /// @dev Last-resort exit when the risk signer cannot attest. Pause first so
   ///      Permit2 cannot pull mid-split. Pays live free balances, including
-  ///      unattested surplus.
+  ///      unattested surplus. The recall is best-effort: when Aave cannot
+  ///      honour the withdrawal, the stranded position is paid out pro-rata as
+  ///      the yield token itself, so an impaired external protocol can never
+  ///      block this path or strand the redeemers' claim on that value.
   function settleRedeemEmergencyInKind(uint256 epochId) external override nonReentrant {
     if (!paused) revert VaultErrors.PauseRequired();
     Epoch storage epoch = epochs[epochId];
     if (epoch.isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
     if (!_durationElapsed(epoch.closedAt, emergencyExitTimeout)) revert VaultErrors.TimeoutNotReached();
-    _recallAll();
+    // Best-effort: never reverts on the adapter, returns what it could not
+    // bring back so it can be paid out in kind below.
+    uint256 stranded = VaultPolicy.tryRecallAllIdle(yieldAdapter);
 
     _checkpointFee();
     uint256 supply = totalSupply();
-    uint256 freeS = _freeSettlement();
+    uint256 freeS = _liquidSettlement();
     uint256 freeC = _freeCorridor();
 
     uint256 shares = epoch.assets;
     uint256 settlementOut = shares == 0 ? 0 : Math.mulDiv(freeS, shares, supply);
     uint256 corridorOut = shares == 0 ? 0 : Math.mulDiv(freeC, shares, supply);
-    _finishRedeemSettle(epochId, epoch, true, settlementOut, corridorOut, 0);
+    uint256 yieldOut = shares == 0 ? 0 : Math.mulDiv(stranded, shares, supply);
+    if (yieldOut > 0) yieldAdapter.transferHeld(address(this), yieldOut);
+    _finishRedeemSettle(epochId, epoch, true, settlementOut, corridorOut, yieldOut, 0);
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -476,12 +492,18 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     } else {
       settlementOut = VaultLib.proRataWithResidue(units, remaining, epoch.remainingSettlement);
       corridorOut = VaultLib.proRataWithResidue(units, remaining, epoch.remainingCorridor);
+      uint256 yieldOut = VaultLib.proRataWithResidue(units, remaining, epoch.remainingYield);
       reservedSettlement -= settlementOut;
       reservedCorridor -= corridorOut;
       epoch.remainingSettlement -= settlementOut;
       epoch.remainingCorridor -= corridorOut;
+      epoch.remainingYield -= yieldOut;
       if (settlementOut > 0) settlementAsset.safeTransfer(receiver, settlementOut);
       if (corridorOut > 0) corridorAsset.safeTransfer(receiver, corridorOut);
+      if (yieldOut > 0) {
+        IERC20(yieldToken).safeTransfer(receiver, yieldOut);
+        emit ClaimedYield(controller, receiver, requestId, yieldOut);
+      }
     }
 
     epoch.remainingUnits -= units;
@@ -638,9 +660,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   /// @inheritdoc IOperatorVault
   function sweepToken(address token, address to) external override onlyGuardian {
     if (to == address(0)) revert VaultErrors.ZeroAddress();
-    if (token == address(this) || token == address(settlementAsset) || token == address(corridorAsset)) {
-      revert VaultErrors.InvalidPair();
-    }
+    // yieldToken is zero when yield is off; sweeping token(0) is nonsense
+    // either way, so the fourth comparison needs no zero-guard.
+    if (
+      token == address(this) || token == address(settlementAsset) || token == address(corridorAsset)
+        || token == yieldToken
+    ) revert VaultErrors.InvalidPair();
     uint256 amount = IERC20(token).balanceOf(address(this));
     if (amount == 0) revert VaultErrors.ZeroAmount();
     IERC20(token).safeTransfer(to, amount);
@@ -759,7 +784,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
       shares: 0,
       remainingUnits: 0,
       remainingSettlement: 0,
-      remainingCorridor: 0
+      remainingCorridor: 0,
+      remainingYield: 0
     });
   }
 
@@ -769,6 +795,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     bool inKind,
     uint256 settlementOut,
     uint256 corridorOut,
+    uint256 yieldOut,
     uint256 price
   ) private {
     uint256 shares = epoch.assets;
@@ -778,11 +805,13 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     epoch.remainingUnits = shares;
     epoch.remainingSettlement = settlementOut;
     epoch.remainingCorridor = corridorOut;
+    epoch.remainingYield = yieldOut;
     epoch.state = EpochState.Settled;
     closedRedeemEpochId = 0;
     lastRedeemSettledAt = block.timestamp;
     _recordSettledNav(price);
     emit RedeemEpochSettled(epochId, inKind, shares, settlementOut, corridorOut);
+    if (yieldOut > 0) emit RedeemYieldSettled(epochId, yieldOut);
   }
 
   function _recordSettledNav(uint256 price) private {

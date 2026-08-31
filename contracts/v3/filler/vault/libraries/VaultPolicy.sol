@@ -93,9 +93,11 @@ library VaultPolicy {
 
   /// @notice Bind a freshly cloned adapter to the calling vault and approve it
   ///         for the settlement asset only.
-  function bindYieldAdapter(address adapter, IERC20 settlement) external {
+  /// @return yieldToken Token the adapter position is held in.
+  function bindYieldAdapter(address adapter, IERC20 settlement) external returns (address yieldToken) {
     IYieldAdapter(adapter).initialize(address(this), address(settlement));
     settlement.forceApprove(adapter, type(uint256).max);
+    return IYieldAdapter(adapter).yieldToken();
   }
 
   /// @notice Recall enough from the adapter so at least `needed` is liquid.
@@ -124,6 +126,19 @@ library VaultPolicy {
     if (address(adapter) == address(0) || adapter.held() == 0) return;
     uint256 withdrawn = adapter.recall(type(uint256).max);
     emit IOperatorVault.IdleRecalled(withdrawn);
+  }
+
+  /// @notice Best-effort full recall for the emergency exit. An impaired Aave
+  ///         reserve must not revert the last-resort settlement, so a failed
+  ///         withdrawal is swallowed and the position still stranded in the
+  ///         adapter is reported back for in-kind distribution.
+  /// @return stranded Underlying value still held by the adapter afterwards.
+  function tryRecallAllIdle(IYieldAdapter adapter) external returns (uint256 stranded) {
+    if (address(adapter) == address(0) || adapter.held() == 0) return 0;
+    try adapter.recall(type(uint256).max) returns (uint256 withdrawn) {
+      emit IOperatorVault.IdleRecalled(withdrawn);
+    } catch {} // solhint-disable-line no-empty-blocks
+    return adapter.held();
   }
 
   function orderPolicyOk(LimitOrder memory order, OrderContext memory ctx) external view returns (bool) {
