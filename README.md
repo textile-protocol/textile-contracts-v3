@@ -17,6 +17,8 @@ The contract set is intentionally small:
   controller for sell-first swaps.
 - `contracts/v3/filler/vendor/uniswapx/reactors/LimitOrderReactor.sol` -
   the pinned UniswapX limit-order reactor used by Textile.
+- `contracts/v3/filler/PreferredFillerValidation.sol` - the reactor validation
+  callback a maker uses to steer an order at specific fillers.
 - `contracts/v3/filler/vendor/**` - the exact Permit2 interfaces, solmate
   files, and UniswapX libraries needed by the reactor.
 - `contracts/v3/filler/vault/**` - `OperatorVault`, its factory, the Aave v3
@@ -65,12 +67,12 @@ Pinned third-party source details are in
 
 ### Textile Swap Contracts
 
-| Chain | Textile LimitOrderReactor | SellFirstFeeController | Permit2 | Fee bps |
-| --- | --- | --- | --- | --- |
-| Base | [0xEb5A29F869FF084B3Fce18d3487a38A56feDC59E](https://basescan.org/address/0xEb5A29F869FF084B3Fce18d3487a38A56feDC59E) | [0x9100D2290fB1eF5AEC1f572a95C1778bF66c8868](https://basescan.org/address/0x9100D2290fB1eF5AEC1f572a95C1778bF66c8868) | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://basescan.org/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 5 |
-| BNB Smart Chain | [0xe03261c0436DB575F92F09EdDF3591E2566B7D97](https://bscscan.com/address/0xe03261c0436DB575F92F09EdDF3591E2566B7D97) | [0xBDA5e4d85674Fc3A4566B1080A3c59Dc2526c057](https://bscscan.com/address/0xBDA5e4d85674Fc3A4566B1080A3c59Dc2526c057) | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://bscscan.com/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 1 |
-| Celo | [0xa9AA0a64769cBed4d3B1Ceb4Df01CdE915C235b3](https://celoscan.io/address/0xa9AA0a64769cBed4d3B1Ceb4Df01CdE915C235b3) | [0x7b005466F905DD882A959888154587fA76cd3Ea7](https://celoscan.io/address/0x7b005466F905DD882A959888154587fA76cd3Ea7) | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://celoscan.io/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 5 |
-| Polygon | [0xF3ffCF21E621552CFcCC724B965e901cDF0D83fe](https://polygonscan.com/address/0xF3ffCF21E621552CFcCC724B965e901cDF0D83fe) | [0x61296A849412A0955bA8c5A84e124400C68a91D7](https://polygonscan.com/address/0x61296A849412A0955bA8c5A84e124400C68a91D7) | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://polygonscan.com/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 5 |
+| Chain | Textile LimitOrderReactor | SellFirstFeeController | PreferredFillerValidation | Permit2 | Fee bps |
+| --- | --- | --- | --- | --- | --- |
+| Base | [0xEb5A29F869FF084B3Fce18d3487a38A56feDC59E](https://basescan.org/address/0xEb5A29F869FF084B3Fce18d3487a38A56feDC59E) | [0x9100D2290fB1eF5AEC1f572a95C1778bF66c8868](https://basescan.org/address/0x9100D2290fB1eF5AEC1f572a95C1778bF66c8868) | [0x80a4238ceF3504A24F53D45Ee295b45fD6314Bb2](https://basescan.org/address/0x80a4238ceF3504A24F53D45Ee295b45fD6314Bb2) | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://basescan.org/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 5 |
+| BNB Smart Chain | [0xe03261c0436DB575F92F09EdDF3591E2566B7D97](https://bscscan.com/address/0xe03261c0436DB575F92F09EdDF3591E2566B7D97) | [0xBDA5e4d85674Fc3A4566B1080A3c59Dc2526c057](https://bscscan.com/address/0xBDA5e4d85674Fc3A4566B1080A3c59Dc2526c057) | [0xBCA5E344077AaC751A1C548a45F28215bB7ec165](https://bscscan.com/address/0xBCA5E344077AaC751A1C548a45F28215bB7ec165) | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://bscscan.com/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 1 |
+| Celo | [0xa9AA0a64769cBed4d3B1Ceb4Df01CdE915C235b3](https://celoscan.io/address/0xa9AA0a64769cBed4d3B1Ceb4Df01CdE915C235b3) | [0x7b005466F905DD882A959888154587fA76cd3Ea7](https://celoscan.io/address/0x7b005466F905DD882A959888154587fA76cd3Ea7) | [0x10B9EbA3a175Df418a35CB8329a527691EE258C5](https://celoscan.io/address/0x10B9EbA3a175Df418a35CB8329a527691EE258C5) | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://celoscan.io/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 5 |
+| Polygon | [0xF3ffCF21E621552CFcCC724B965e901cDF0D83fe](https://polygonscan.com/address/0xF3ffCF21E621552CFcCC724B965e901cDF0D83fe) | [0x61296A849412A0955bA8c5A84e124400C68a91D7](https://polygonscan.com/address/0x61296A849412A0955bA8c5A84e124400C68a91D7) | not recorded | [0x000000000022D473030F116dDEE9F6B43aC78BA3](https://polygonscan.com/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | 5 |
 
 ### Official UniswapX References
 
