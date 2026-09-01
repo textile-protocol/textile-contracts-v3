@@ -9,12 +9,6 @@
     "resolveJsonModule": true,
     "outDir": "./dist"
   },
-  "include": [
-    "./scripts",
-    "./test",
-    "./typechain-types",
-    "../constants/src/getLatestVaultVersion.ts",
-    "../constants/src/storage.ts"
-  ],
+  "include": ["./constants", "./scripts", "./test", "./typechain-types"],
   "files": ["./hardhat.config.ts"]
 }

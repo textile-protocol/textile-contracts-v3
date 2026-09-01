@@ -7,7 +7,7 @@
   "type": "commonjs",
   "scripts": {
     "compile": "hardhat --config hardhat.config.v3.ts compile",
-    "test:v3": "hardhat --config hardhat.config.v3.ts test test/v3/FillerReactor/deploy.test.ts test/v3/FillerReactor/SellFirstFeeController.test.ts",
+    "test:v3": "hardhat --config hardhat.config.v3.ts test",
     "test:foundry:v3": "forge test --match-path 'test/foundry/v3/security/SellFirstFeeControllerAuditFindings.t.sol'",
     "coverage:v3": "SOLIDITY_COVERAGE=true hardhat --config hardhat.config.v3.ts coverage --solcoverjs ./.solcover.v3.js"
   },

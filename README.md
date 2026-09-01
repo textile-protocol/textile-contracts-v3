@@ -19,10 +19,16 @@ The contract set is intentionally small:
   the pinned UniswapX limit-order reactor used by Textile.
 - `contracts/v3/filler/vendor/**` - the exact Permit2 interfaces, solmate
   files, and UniswapX libraries needed by the reactor.
+- `contracts/v3/filler/vault/**` - `OperatorVault`, its factory, the Aave v3
+  yield adapter, and the ERC-1271 policy that lets a vault sign reactor orders.
 - `test/v3/FillerReactor/` - Hardhat tests for deployment, fee wiring, Permit2
   signatures, and the reactor fill path.
+- `test/v3/OperatorVault/` - Hardhat tests for the vault: share math, epochs,
+  fees, yield, signature policy, and regressions for the audit findings.
 - `test/foundry/v3/security/SellFirstFeeControllerAuditFindings.t.sol` -
   Foundry regression tests for the fee-controller audit findings.
+- `constants/src/` - the TypeScript share-math and NAV-attestation modules the
+  vault tests check the Solidity against.
 - `addresses/` - deployment snapshots for the Textile swap contracts.
 
 ## Swap Flow
@@ -111,8 +117,9 @@ yarn test:v3
 yarn test:foundry:v3
 ```
 
-`yarn test:v3` runs the Hardhat swap contract tests. `yarn test:foundry:v3`
-runs the fee-controller audit regression tests.
+`yarn test:v3` runs the Hardhat suite for the reactor, the fee controller, and
+the operator vault. `yarn test:foundry:v3` runs the fee-controller audit
+regression tests.
 
 ## License
 
