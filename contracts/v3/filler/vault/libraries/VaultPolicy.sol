@@ -100,18 +100,23 @@ library VaultPolicy {
 
   /// @notice Bind a freshly cloned adapter to the calling vault and approve it
   ///         for the settlement asset only.
-  function bindYieldAdapter(address adapter, IERC20 settlement) external {
+  /// @return yieldToken Token the adapter position is held in.
+  function bindYieldAdapter(address adapter, IERC20 settlement) external returns (address yieldToken) {
     IYieldAdapter(adapter).initialize(address(this), address(settlement));
     settlement.forceApprove(adapter, type(uint256).max);
+    return IYieldAdapter(adapter).yieldToken();
   }
 
   /// @notice Recall enough from the adapter so at least `needed` is liquid.
   ///         Strict: a shortfall of even 1 wei reverts, so a fill can never
   ///         pull against a short balance.
-  function prepareIdle(IYieldAdapter adapter, uint256 liquid, uint256 needed) external {
+  /// @param reserved Position value already owed to emergency redeemers in
+  ///        yield token. Not vault inventory — a fill may not withdraw it.
+  function prepareIdle(IYieldAdapter adapter, uint256 liquid, uint256 needed, uint256 reserved) external {
     if (liquid >= needed) return;
     if (address(adapter) == address(0)) revert VaultErrors.InsufficientSettlement();
     uint256 gap = needed - liquid;
+    if (adapter.held() < reserved + gap) revert VaultErrors.InsufficientSettlement();
     uint256 withdrawn = adapter.recall(gap);
     if (withdrawn < gap) revert VaultErrors.InsufficientSettlement();
     emit IOperatorVault.SettlementPrepared(needed, withdrawn);
@@ -126,11 +131,77 @@ library VaultPolicy {
     emit IOperatorVault.IdleAllocated(assets);
   }
 
-  /// @notice Recall the full adapter position. No-op when nothing is held.
-  function recallAllIdle(IYieldAdapter adapter) external {
-    if (address(adapter) == address(0) || adapter.held() == 0) return;
-    uint256 withdrawn = adapter.recall(type(uint256).max);
-    emit IOperatorVault.IdleRecalled(withdrawn);
+  /// @notice Recall the adapter position down to `reserved`. No-op when
+  ///         nothing free is held.
+  /// @param reserved Position value already owed to emergency redeemers in
+  ///        yield token. Withdrawing it would turn their in-kind claim into
+  ///        vault settlement they can no longer reach.
+  function recallAllIdle(IYieldAdapter adapter, uint256 reserved) external {
+    if (address(adapter) == address(0)) return;
+    uint256 held = adapter.held();
+    if (held <= reserved) return;
+    emit IOperatorVault.IdleRecalled(adapter.recall(_recallAmount(held, reserved)));
+  }
+
+  /// @notice Best-effort full recall for the emergency exit. An impaired Aave
+  ///         reserve must not revert the last-resort settlement, so a failed
+  ///         withdrawal is swallowed and the position still stranded in the
+  ///         adapter is reported back for in-kind distribution.
+  /// @param reserved Position value already owed to emergency redeemers in
+  ///        yield token, left behind and excluded from `stranded`.
+  /// @return stranded Free underlying value still held by the adapter after.
+  function tryRecallAllIdle(IYieldAdapter adapter, uint256 reserved) external returns (uint256 stranded) {
+    if (address(adapter) == address(0)) return 0;
+    uint256 held = adapter.held();
+    if (held <= reserved) return 0;
+    try adapter.recall(_recallAmount(held, reserved)) returns (uint256 withdrawn) {
+      emit IOperatorVault.IdleRecalled(withdrawn);
+      // Only re-read on success: the catch means the withdrawal reverted, so
+      // nothing moved and `held` still stands. That is the paused-reserve
+      // case this function exists for, so it is the one worth not paying for.
+      held = adapter.held();
+    } catch {} // solhint-disable-line no-empty-blocks
+    return held > reserved ? held - reserved : 0;
+  }
+
+  /// @dev `max` keeps Aave's own full-balance path (no 1-wei index dust) when
+  ///      nothing is reserved; otherwise take exactly the free part.
+  function _recallAmount(uint256 held, uint256 reserved) private pure returns (uint256) {
+    return reserved == 0 ? type(uint256).max : held - reserved;
+  }
+
+  /// @notice Best-effort pull of the slice an emergency exit owes redeemers
+  ///         but could not move. Never reverts.
+  /// @param owed The deferred slice at its current face value.
+  /// @return synced True when it crossed, so the vault can clear its reserve.
+  ///         The amount emitted is what the adapter actually moved, which can
+  ///         be a wei under `owed` after the protocol's own rounding.
+  function syncPendingYield(IYieldAdapter adapter, uint256 owed) external returns (bool synced) {
+    try adapter.transferHeld(address(this), owed) returns (uint256 sent) {
+      emit IOperatorVault.YieldPullSynced(sent);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /// @notice Pay one claimant's share of the in-kind yield leg.
+  /// @dev The residue helper hands the last claimant the exact remainder, so
+  ///      the pot drains to zero rather than stranding dust in a vault that
+  ///      cannot sweep the yield token.
+  function payYield(
+    address yieldToken,
+    address controller,
+    address receiver,
+    uint256 epochId,
+    uint256 weight,
+    uint256 outstanding
+  ) external {
+    uint256 yieldOut =
+      VaultLib.proRataWithResidue(weight, outstanding, IERC20(yieldToken).balanceOf(address(this)));
+    if (yieldOut == 0) return;
+    IERC20(yieldToken).safeTransfer(receiver, yieldOut);
+    emit IOperatorVault.ClaimedYield(controller, receiver, epochId, yieldOut);
   }
 
   function orderPolicyOk(LimitOrder memory order, OrderContext memory ctx) external view returns (bool) {

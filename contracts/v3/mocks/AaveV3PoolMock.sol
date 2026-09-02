@@ -4,15 +4,19 @@ pragma solidity 0.8.30;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IAaveV3Pool } from "../filler/vault/adapters/IAaveV3Pool.sol";
 
 /// @notice Rebasing aToken mock: balances are scaled units multiplied by the
 ///         pool's liquidity index, like real Aave v3 aTokens. Mint/burn take
 ///         underlying amounts and are pool-only.
+/// @dev Rounding matters here and has bitten this vault before, so it mirrors
+///      Aave's `WadRayMath` exactly: every face-value <-> scaled conversion is
+///      `rayMul`/`rayDiv`, which round half up. A mock that floors makes a
+///      face-value round trip look lossless when on-chain it is not.
 contract ATokenMock {
   uint256 private constant RAY = 1e27;
+  uint256 private constant HALF_RAY = 0.5e27;
 
   AaveV3PoolMock public immutable pool;
   mapping(address => uint256) public scaledBalanceOf;
@@ -27,17 +31,42 @@ contract ATokenMock {
   }
 
   function balanceOf(address user) external view returns (uint256) {
-    return (scaledBalanceOf[user] * pool.liquidityIndex()) / RAY;
+    return _rayMul(scaledBalanceOf[user], pool.liquidityIndex());
   }
 
   function mint(address user, uint256 amount) external onlyPool {
-    scaledBalanceOf[user] += (amount * RAY) / pool.liquidityIndex();
+    scaledBalanceOf[user] += _rayDiv(amount, pool.liquidityIndex());
   }
 
   function burn(address user, uint256 amount) external onlyPool {
-    uint256 scaled = Math.mulDiv(amount, RAY, pool.liquidityIndex(), Math.Rounding.Ceil);
+    uint256 scaled = _rayDiv(amount, pool.liquidityIndex());
     uint256 balance = scaledBalanceOf[user];
     scaledBalanceOf[user] = scaled > balance ? 0 : balance - scaled;
+  }
+
+  /// @notice Real aTokens are full ERC-20s; transfer moves face value and
+  ///         routes through `Pool.finalizeTransfer`, whose reserve validation
+  ///         rejects a paused reserve just like `withdraw` does.
+  /// @dev `AToken._transfer` scales with `amount.rayDiv(index)` and the burn
+  ///      in `withdraw` uses the same rounding, so asking to move a face
+  ///      amount that a previous burn rounded away reverts on the scaled
+  ///      balance. That is the deadlock `transferHeld`'s clamp exists for.
+  function transfer(address to, uint256 amount) external returns (bool) {
+    require(!pool.transferReverts(), "ATokenMock: transfer off");
+    uint256 scaled = _rayDiv(amount, pool.liquidityIndex());
+    require(scaled <= scaledBalanceOf[msg.sender], "ATokenMock: balance");
+    scaledBalanceOf[msg.sender] -= scaled;
+    scaledBalanceOf[to] += scaled;
+    return true;
+  }
+
+  /// @dev Aave `WadRayMath.rayMul` / `rayDiv`: multiply/divide, round half up.
+  function _rayMul(uint256 a, uint256 b) private pure returns (uint256) {
+    return (a * b + HALF_RAY) / RAY;
+  }
+
+  function _rayDiv(uint256 a, uint256 b) private pure returns (uint256) {
+    return (a * RAY + b / 2) / b;
   }
 }
 
@@ -53,6 +82,7 @@ contract AaveV3PoolMock is IAaveV3Pool {
   mapping(address => address) public aTokenOf;
   bool public supplyReverts;
   bool public withdrawReverts;
+  bool public transferReverts;
   uint256 public withdrawShaveWei;
 
   function createReserve(address asset) external returns (address aToken) {
@@ -70,6 +100,13 @@ contract AaveV3PoolMock is IAaveV3Pool {
 
   function setWithdrawReverts(bool reverts) external {
     withdrawReverts = reverts;
+  }
+
+  /// @notice A paused Aave reserve rejects withdrawals and aToken transfers
+  ///         alike, so the two flags only ever move together.
+  function setReservePaused(bool isPaused) external {
+    withdrawReverts = isPaused;
+    transferReverts = isPaused;
   }
 
   /// @notice Pay out `shaveWei` less than requested, like an index-rounding gap.
@@ -102,5 +139,10 @@ contract AaveV3PoolMock is IAaveV3Pool {
   /// @inheritdoc IAaveV3Pool
   function getReserveData(address asset) external view override returns (ReserveDataLegacy memory data) {
     data.aTokenAddress = aTokenOf[asset];
+  }
+
+  /// @inheritdoc IAaveV3Pool
+  function getReserveNormalizedIncome(address) external view override returns (uint256) {
+    return liquidityIndex;
   }
 }

@@ -34,6 +34,7 @@ library VaultErrors {
   error NothingToClaim();
   error AlreadyInitialized();
   error YieldNotSupported();
+  error YieldNotLiquid();
   error UnknownVault();
   error UnsupportedOrder();
 }

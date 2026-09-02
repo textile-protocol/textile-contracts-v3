@@ -19,6 +19,31 @@ interface IYieldAdapter {
   /// @notice Current position value in underlying units, interest included.
   function held() external view returns (uint256);
 
+  /// @notice Token the position is custodied in (e.g. the aToken). Not
+  ///         necessarily one-to-one with the underlying — that is what
+  ///         `toScaled` exists for. Must not change after `initialize`: the
+  ///         vault reads it once and holds it as an immutable.
+  function yieldToken() external view returns (address);
+
+  /// @notice Express a face-value position amount in index-invariant units.
+  /// @dev The denomination the vault stores in-kind claim weights in. A
+  ///      rebasing position (aTokens) grows in face value over time, so two
+  ///      amounts snapshotted at different moments are not comparable and
+  ///      adding them as weights would shift value between claimants; scaled
+  ///      units are fixed under a rebase. An adapter whose token does not
+  ///      rebase returns `assets` unchanged.
+  /// @param assets Face-value position amount, in underlying units.
+  /// @return scaled `assets` in index-invariant units. Rounds down.
+  function toScaled(uint256 assets) external view returns (uint256 scaled);
+
+  /// @notice Value index-invariant units at the position's current face value.
+  /// @dev Inverse of `toScaled`, and the reason the vault can hold a reserve
+  ///      that keeps up with a rebase instead of freezing at a snapshot.
+  ///      Rounds up, so a reserve derived from it never sits under the claim.
+  /// @param scaled Index-invariant amount.
+  /// @return assets `scaled` in underlying units, at the current index.
+  function fromScaled(uint256 scaled) external view returns (uint256 assets);
+
   /// @notice One-time binding, called by the vault from its constructor.
   /// @param vault_ Vault to bind. Must be the caller.
   /// @param asset_ Underlying asset to deploy.
@@ -32,4 +57,17 @@ interface IYieldAdapter {
   /// @param assets Underlying amount, or `type(uint256).max` for everything.
   /// @return withdrawn Underlying amount actually sent to the vault.
   function recall(uint256 assets) external returns (uint256 withdrawn);
+
+  /// @notice Transfer part of the position out as the yield token itself,
+  ///         without touching the external protocol. Vault only. Used by the
+  ///         emergency exit when the underlying cannot be withdrawn.
+  /// @dev Clamped to the live position: an adapter must send
+  ///      `min(assets, position)` rather than revert. On a rebasing token the
+  ///      protocol's own rounding can leave the position an atomic unit under
+  ///      what the caller asked for, and reverting there would freeze the
+  ///      claim it was reserved for permanently.
+  /// @param to Recipient of the yield tokens.
+  /// @param assets Position amount in underlying units.
+  /// @return sent Amount actually transferred. Never more than `assets`.
+  function transferHeld(address to, uint256 assets) external returns (uint256 sent);
 }

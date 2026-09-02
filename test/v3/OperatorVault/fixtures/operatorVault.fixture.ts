@@ -253,14 +253,21 @@ export async function deployOperatorVault(
   }
 }
 
-/** Simulate Aave interest: bump the liquidity index and back it with underlying. */
+/**
+ * Simulate Aave interest: bump the liquidity index and back it with
+ * underlying. Every aToken holder rebases, so the vault is counted too — it
+ * holds aTokens for redeemers after an emergency exit.
+ */
 export async function accrueAaveInterest(
-  ctx: Pick<DeployedVault, 'aavePool' | 'aToken' | 'settlement' | 'adapter'>,
+  ctx: Pick<DeployedVault, 'aavePool' | 'aToken' | 'settlement' | 'adapter' | 'vault'>,
   newIndexRay: bigint
 ): Promise<void> {
-  const before = await ctx.aToken.balanceOf(await ctx.adapter.getAddress())
+  const holders = [await ctx.adapter.getAddress(), await ctx.vault.getAddress()]
+  const sum = async () =>
+    (await Promise.all(holders.map((h) => ctx.aToken.balanceOf(h)))).reduce((a, b) => a + b, 0n)
+  const before = await sum()
   await ctx.aavePool.setLiquidityIndex(newIndexRay)
-  const after = await ctx.aToken.balanceOf(await ctx.adapter.getAddress())
+  const after = await sum()
   if (after > before) {
     await ctx.settlement.mint(await ctx.aavePool.getAddress(), after - before)
   }

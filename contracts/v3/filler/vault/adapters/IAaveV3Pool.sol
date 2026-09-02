@@ -35,4 +35,8 @@ interface IAaveV3Pool {
   function withdraw(address asset, uint256 amount, address to) external returns (uint256);
 
   function getReserveData(address asset) external view returns (ReserveDataLegacy memory);
+
+  /// @dev Liquidity index in RAY (1e27), interest accrued up to now included.
+  ///      `aToken.balanceOf` is the scaled balance multiplied by this.
+  function getReserveNormalizedIncome(address asset) external view returns (uint256);
 }

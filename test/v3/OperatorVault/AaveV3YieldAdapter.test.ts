@@ -109,6 +109,37 @@ describe('AaveV3YieldAdapter', function () {
     expect(await ctx.adapter.held()).to.equal(usdt(1_100n))
   })
 
+  it('converts face value to scaled units the index cannot move', async function () {
+    const ctx = await deployBound()
+    await ctx.adapter.connect(ctx.eoaVault).deploy(usdt(1_000n))
+    expect(await ctx.adapter.toScaled(usdt(1_000n))).to.equal(usdt(1_000n))
+
+    // The position rebases to 1,100 face; the same position, so the same
+    // scaled units. That invariance is what lets the vault add claim weights
+    // booked at different moments.
+    await ctx.pool.setLiquidityIndex((RAY * 11n) / 10n)
+    expect(await ctx.adapter.held()).to.equal(usdt(1_100n))
+    expect(await ctx.adapter.toScaled(usdt(1_100n))).to.equal(usdt(1_000n))
+    expect(await ctx.adapter.toScaled(await ctx.adapter.held())).to.equal(
+      await ctx.aToken.scaledBalanceOf(await ctx.adapter.getAddress())
+    )
+  })
+
+  it('clamps a transfer to the live position instead of reverting', async function () {
+    // Aave's burn rounds the scaled amount up, so a recall that means to
+    // leave a reserve behind can land an atomic unit under it. The vault then
+    // asks to move its recorded figure; reverting there would freeze the
+    // claim it was reserved for permanently, so the adapter sends what it has.
+    const ctx = await deployBound()
+    await ctx.adapter.connect(ctx.eoaVault).deploy(usdt(1_000n))
+    await ctx.pool.setLiquidityIndex((RAY * 11n) / 10n)
+    const held = await ctx.adapter.held()
+
+    await ctx.adapter.connect(ctx.eoaVault).transferHeld(ctx.other.address, held + 1n)
+    expect(await ctx.aToken.balanceOf(ctx.other.address)).to.equal(held)
+    expect(await ctx.adapter.held()).to.equal(0n)
+  })
+
   it('recalls exact amounts and the full position with max', async function () {
     const ctx = await deployBound()
     await ctx.adapter.connect(ctx.eoaVault).deploy(usdt(1_000n))

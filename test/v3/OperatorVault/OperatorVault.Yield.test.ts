@@ -306,7 +306,7 @@ describe('OperatorVault — idle yield', function () {
       expect(await ctx.adapter.held()).to.equal(0n)
     })
 
-    it('fails settlement while Aave is down, but pause and recovery still work', async function () {
+    it('fails cash settlement while Aave is down, but the emergency exit still pays out', async function () {
       const ctx = await deployOperatorVault({ enableYield: true })
       await seedShares(ctx, ctx.lp1, usdt(10_000n))
       await ctx.vault.allocateIdle()
@@ -321,15 +321,13 @@ describe('OperatorVault — idle yield', function () {
       // Guardian pause never touches Aave.
       await expect(ctx.vault.connect(ctx.guardian).pause()).to.emit(ctx.vault, 'Paused')
 
-      // Emergency exit also needs the recall, so it waits for Aave too.
+      // The emergency exit does not wait for Aave: the stranded position is
+      // settled pro-rata in aTokens (H-01 remediation).
       await time.increase(await ctx.vault.emergencyExitTimeout())
-      await expect(ctx.vault.settleRedeemEmergencyInKind(redeemId)).to.be.reverted
-
-      await ctx.aavePool.setWithdrawReverts(false)
       await expect(ctx.vault.settleRedeemEmergencyInKind(redeemId))
-        .to.emit(ctx.vault, 'IdleRecalled')
-        .withArgs(usdt(10_000n))
-      expect(await ctx.adapter.held()).to.equal(0n)
+        .to.emit(ctx.vault, 'RedeemYieldSettled')
+        .withArgs(redeemId, usdt(2_000n))
+      expect(await ctx.adapter.held()).to.equal(usdt(8_000n))
     })
   })
 

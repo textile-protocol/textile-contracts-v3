@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IYieldAdapter } from "../interfaces/IYieldAdapter.sol";
 import { VaultErrors } from "../libraries/VaultErrors.sol";
@@ -21,6 +22,8 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   using SafeERC20 for IERC20;
 
   uint16 private constant REFERRAL_CODE = 0;
+  /// @dev Aave denominates the liquidity index in RAY.
+  uint256 private constant RAY = 1e27;
 
   IAaveV3Pool public immutable pool;
 
@@ -78,5 +81,42 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   /// @dev aToken `balanceOf` is index-scaled, so interest is already included.
   function held() external view override returns (uint256) {
     return aToken.balanceOf(address(this));
+  }
+
+  /// @inheritdoc IYieldAdapter
+  function yieldToken() external view override returns (address) {
+    return address(aToken);
+  }
+
+  /// @inheritdoc IYieldAdapter
+  /// @dev aToken face value is the scaled balance times the liquidity index,
+  ///      so dividing by the index is exactly what `scaledBalanceOf` stores.
+  function toScaled(uint256 assets) external view override returns (uint256) {
+    return Math.mulDiv(assets, RAY, pool.getReserveNormalizedIncome(asset));
+  }
+
+  /// @inheritdoc IYieldAdapter
+  /// @dev Rounds up so a reserve derived from this can never sit under what
+  ///      it is reserving. The overshoot is at most a wei, and `transferHeld`
+  ///      clamps, so it costs nothing.
+  function fromScaled(uint256 scaled) external view override returns (uint256) {
+    return Math.mulDiv(scaled, pool.getReserveNormalizedIncome(asset), RAY, Math.Rounding.Ceil);
+  }
+
+  /// @inheritdoc IYieldAdapter
+  /// @dev No event: the vault's `YieldPullSynced` already records `sent` in
+  ///      the same transaction, and `to` is always the vault, so an
+  ///      adapter-level copy would be a second source of truth for one fact.
+  ///      aTokens transfer at face value, so `assets` is also the aToken
+  ///      amount — but the round trip through Aave's scaled math is lossy.
+  ///      `withdraw` burns `amount.rayDiv(index)`, which rounds up, so a
+  ///      recall that means to leave a reserve behind can land an atomic unit
+  ///      under it. Transferring the caller's recorded figure would then
+  ///      revert forever and freeze the claim it was reserved for, so the
+  ///      request is clamped to what the position actually holds.
+  function transferHeld(address to, uint256 assets) external override onlyVault returns (uint256 sent) {
+    IERC20 token = aToken;
+    sent = Math.min(assets, token.balanceOf(address(this)));
+    token.safeTransfer(to, sent);
   }
 }

@@ -20,6 +20,11 @@ interface IOperatorVault {
   event SettlementPrepared(uint256 needed, uint256 recalled);
   event IdleAllocated(uint256 assets);
   event IdleRecalled(uint256 assets);
+  /// @notice The deferred emergency slice finally crossed out of the adapter.
+  event YieldPullSynced(uint256 assets);
+  event ClaimedYield(
+    address indexed controller, address indexed receiver, uint256 indexed epochId, uint256 yieldOut
+  );
 
   function requestDeposit(uint256 assets, address controller, address owner)
     external
@@ -59,11 +64,29 @@ interface IOperatorVault {
   ///         including unattested surplus. Anyone may call. Attested in-kind
   ///         while paused also pays live, so a hostile risk key cannot
   ///         pre-settle a partial epoch at zero and block this path.
+  ///         The adapter recall is best-effort and this path never calls the
+  ///         external protocol: a position Aave cannot pay back becomes a
+  ///         pro-rata in-kind claim on the yield token, collected at claim
+  ///         time, so an impaired external protocol cannot block this exit.
   /// @param epochId Closed redeem epoch to settle.
   function settleRedeemEmergencyInKind(uint256 epochId) external;
 
+  /// @notice In-kind yield bookkeeping for emergency exits. Both figures are
+  ///         in the adapter's index-invariant scaled units, not face value,
+  ///         so neither goes stale when the position rebases.
+  /// @return weight Unclaimed claim weight over the vault's yield-token
+  ///         balance. Claims split that balance by weight, so interest
+  ///         accruing after settlement follows the claim.
+  /// @return pendingPull Position already owed to redeemers that the external
+  ///         protocol has not let the vault move out of the adapter yet.
+  ///         Excluded from NAV and off-limits to every recall, at whatever it
+  ///         is worth now rather than at what it was worth when it settled.
+  function yieldReserves() external view returns (uint256 weight, uint256 pendingPull);
+
   /// @notice Guardian-only sweep of a non-working ERC-20. Reverts for the
-  ///         vault share token, settlement asset, and corridor asset.
+  ///         vault share token, settlement asset, corridor asset, and yield
+  ///         token (the vault holds yield tokens for redeemers after an
+  ///         emergency exit under an impaired external protocol).
   /// @param token Token to transfer. Must not be a working asset.
   /// @param to Recipient. Cannot be the zero address.
   function sweepToken(address token, address to) external;
