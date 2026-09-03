@@ -5,7 +5,9 @@
  * Keep this file and the Solidity library in lockstep.
  */
 
-export const WAD = 10n ** 18n
+// Not `10n ** 18n`: babel-jest (web tests) compiles bigint `**` to Math.pow,
+// which throws on BigInt at module load.
+export const WAD = BigInt('1000000000000000000')
 export const YEAR = 365n * 24n * 60n * 60n
 export const EPOCH_NONCE_SHIFT = 128n
 
