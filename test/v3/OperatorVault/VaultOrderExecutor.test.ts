@@ -41,11 +41,15 @@ describe('VaultOrderExecutor', function () {
       outputToken: string
       outputAmount: bigint
       taker: string
+      /** Defaults to the real RFQ binding, {taker, executor}: fill() only
+       *  lets a bound filler call it, and the reactor sees the executor. */
+      fillers?: string[]
     }
   ) {
-    const [block, epoch] = await Promise.all([
+    const [block, epoch, executorAddr] = await Promise.all([
       ethers.provider.getBlock('latest'),
       ctx.vault.tradingEpoch(),
+      ctx.executor.getAddress(),
     ])
     const { signature, params } = await signVaultEnvelope(ctx.strategy, ctx.risk, {
       reactor: ctx.reactor,
@@ -55,6 +59,7 @@ describe('VaultOrderExecutor', function () {
       nonce: (epoch << 128n) | nonceCounter++,
       deadline: BigInt(block!.timestamp + 600),
       preferredFiller: ctx.preferredFiller,
+      fillers: [o.taker, executorAddr],
       ...o,
     })
     return { order: encodeLimitOrder(params), sig: signature }
@@ -85,7 +90,7 @@ describe('VaultOrderExecutor', function () {
       inputAmount: usdt(5_000n),
       outputToken: ctx.corridor.target as string,
       outputAmount: cngn(5_000n),
-      taker: executorAddr,
+      taker: filler.address,
     })
 
     await ctx.corridor.mint(filler.address, cngn(5_000n))
@@ -127,6 +132,7 @@ describe('VaultOrderExecutor', function () {
       outputToken: ctx.corridor.target as string,
       outputAmount: cngn(5_000n),
       taker: filler.address,
+      fillers: [filler.address],
     })
     await ctx.corridor.mint(filler.address, cngn(5_000n))
     await ctx.corridor.connect(filler).approve(ctx.reactor, ethers.MaxUint256)
@@ -158,7 +164,7 @@ describe('VaultOrderExecutor', function () {
       inputAmount: usdt(5_000n),
       outputToken: ctx.corridor.target as string,
       outputAmount: output,
-      taker: executorAddr,
+      taker: filler.address,
     })
 
     // The caller funds the order output plus the injected 3 bps fee.
@@ -191,6 +197,7 @@ describe('VaultOrderExecutor', function () {
       outputToken: ctx.corridor.target as string,
       outputAmount: cngn(4_000n),
       taker: filler.address,
+      fillers: [filler.address],
     })
     await ctx.corridor.mint(filler.address, cngn(4_000n))
     await ctx.corridor.connect(filler).approve(ctx.reactor, ethers.MaxUint256)
@@ -222,7 +229,7 @@ describe('VaultOrderExecutor', function () {
       inputAmount: cngn(2_000n),
       outputToken: ctx.settlement.target as string,
       outputAmount: usdt(3_000n),
-      taker: executorAddr,
+      taker: filler.address,
     })
     await ctx.settlement.mint(filler.address, usdt(3_000n))
     await ctx.settlement.connect(filler).approve(executorAddr, ethers.MaxUint256)
@@ -249,7 +256,7 @@ describe('VaultOrderExecutor', function () {
       inputAmount: cngn(2_000n),
       outputToken: ctx.settlement.target as string,
       outputAmount: usdt(3_000n),
-      taker: executorAddr,
+      taker: filler.address,
     })
     await ctx.settlement.mint(filler.address, usdt(3_000n))
     await ctx.settlement.connect(filler).approve(executorAddr, ethers.MaxUint256)
@@ -310,5 +317,37 @@ describe('VaultOrderExecutor', function () {
     await expect(
       ctx.executor.fill({ order: encodeLimitOrder(params), sig: '0x' })
     ).to.be.revertedWithCustomError(ctx.executor, 'UnsupportedOrder')
+  })
+
+  it('rejects a caller who is not a bound preferred filler', async function () {
+    const ctx = await deployExecutorContext()
+    const executorAddr = await ctx.executor.getAddress()
+    const taker = ctx.lp2
+    const frontRunner = ctx.other
+
+    // Bound to {taker, executor}; exclusive for its whole life (exclusiveUntil = deadline).
+    const order = await signedOrder(ctx, {
+      inputToken: ctx.settlement.target as string,
+      inputAmount: usdt(5_000n),
+      outputToken: ctx.corridor.target as string,
+      outputAmount: cngn(5_000n),
+      taker: taker.address,
+    })
+
+    // A searcher who copied the mempool blob funds the output and calls fill —
+    // the reactor would accept the executor as filler, the wrapper rejects them.
+    await ctx.corridor.mint(frontRunner.address, cngn(5_000n))
+    await ctx.corridor.connect(frontRunner).approve(executorAddr, ethers.MaxUint256)
+    await expect(ctx.executor.connect(frontRunner).fill(order)).to.be.revertedWithCustomError(
+      ctx.executor,
+      'CallerNotPreferredFiller'
+    )
+
+    // The bound taker fills the same order and receives the input.
+    await ctx.corridor.mint(taker.address, cngn(5_000n))
+    await ctx.corridor.connect(taker).approve(executorAddr, ethers.MaxUint256)
+    const before = await ctx.settlement.balanceOf(taker.address)
+    await ctx.executor.connect(taker).fill(order)
+    expect((await ctx.settlement.balanceOf(taker.address)) - before).to.equal(usdt(5_000n))
   })
 })

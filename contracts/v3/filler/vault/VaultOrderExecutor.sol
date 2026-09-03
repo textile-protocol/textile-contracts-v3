@@ -28,13 +28,15 @@ interface IFeeControllerSource {
  *         UniswapX filler: it receives the input and pays the output, both of
  *         which are forwarded to `msg.sender` in the same transaction. It
  *         never holds tokens across transactions.
- * @dev Exclusivity caveat, by design: `PreferredFillerValidation` sees this
- *      contract as the filler, so listing it as a preferred filler makes the
- *      exclusive window public — any caller of `fill()` passes the check,
- *      receives the Permit2 input, and pays the signed output to the vault.
- *      The vault's economics are unaffected, but preferred-filler settler
- *      exclusivity does not apply to vault orders that name this executor.
- *      Only list it on orders where open filling is acceptable.
+ * @dev Preferred-filler exclusivity is re-imposed at the wrapper. The reactor
+ *      sees this contract as the filler, so `PreferredFillerValidation` alone
+ *      would let any caller of `fill()` receive the Permit2 input — front-running
+ *      the taker whose signed blob is public in the mempool. `fill()` therefore
+ *      requires the caller to be one of the order's preferred fillers (the bound
+ *      taker); the executor's own slot, present only so the reactor accepts it
+ *      as filler, does not count. VaultPolicy forces `exclusiveUntil >= deadline`
+ *      on every vault order, so a vault order is taker-exclusive for its whole
+ *      fillable life — there is no open window to fall through to.
  */
 contract VaultOrderExecutor is ReentrancyGuard {
   using SafeERC20 for IERC20;
@@ -61,8 +63,9 @@ contract VaultOrderExecutor is ReentrancyGuard {
   }
 
   /// @notice Fill a vault LimitOrder. The caller supplies the output token
-  ///         (approved to this contract) and receives the input token.
-  ///         Deliberately permissionless — see the exclusivity caveat above.
+  ///         (approved to this contract) and receives the input token. During
+  ///         the order's exclusive window the caller must be a bound preferred
+  ///         filler — see the exclusivity note above.
   /// @param signedOrder abi-encoded LimitOrder plus the vault's ERC-1271 envelope.
   function fill(SignedOrder calldata signedOrder) external nonReentrant {
     LimitOrder memory order = abi.decode(signedOrder.order, (LimitOrder));
@@ -71,6 +74,8 @@ contract VaultOrderExecutor is ReentrancyGuard {
     if (address(order.info.reactor) != address(reactor)) revert VaultErrors.UnsupportedOrder();
     // Vault policy signs exactly one output; anything else is not a vault order.
     if (order.outputs.length != 1) revert VaultErrors.UnsupportedOrder();
+    // Re-impose taker exclusivity the reactor can't (it sees us as the filler).
+    _assertCallerMayFill(order.info.additionalValidationData);
 
     IERC20 inputToken = IERC20(address(order.input.token));
     IERC20 outputToken = IERC20(order.outputs[0].token);
@@ -105,6 +110,23 @@ contract VaultOrderExecutor is ReentrancyGuard {
     emit ExecutorFill(
       vault, msg.sender, address(inputToken), order.input.amount, address(outputToken), outputAmount
     );
+  }
+
+  /// @dev Gate `fill()` on the order's own preferred-filler binding so the
+  ///      permissionless wrapper cannot hand a fill to a front-runner. Binding
+  ///      format matches PreferredFillerValidation: abi.encode(address[]
+  ///      preferredFillers, uint256 exclusiveUntil). The caller must be one of
+  ///      those fillers, i.e. the bound taker; the executor's own slot can never
+  ///      match because this contract never calls its own `fill()`. The
+  ///      exclusiveUntil is ignored: VaultPolicy pins it at or past the order
+  ///      deadline, so the order is never openly fillable while it is live.
+  function _assertCallerMayFill(bytes memory validationData) private view {
+    (address[] memory preferredFillers,) = abi.decode(validationData, (address[], uint256));
+    uint256 count = preferredFillers.length;
+    for (uint256 i = 0; i < count; ++i) {
+      if (preferredFillers[i] == msg.sender) return;
+    }
+    revert VaultErrors.CallerNotPreferredFiller();
   }
 
   /// @dev Mirrors `ProtocolFees._injectFees`: ask the reactor's fee controller

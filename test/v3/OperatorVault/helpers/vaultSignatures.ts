@@ -63,8 +63,8 @@ export async function freshAttestation(
   }
 }
 
-export function encodeValidationData(taker: string, exclusiveUntil: bigint): string {
-  return AbiCoder.defaultAbiCoder().encode(['address[]', 'uint256'], [[taker], exclusiveUntil])
+export function encodeValidationData(fillers: string[], exclusiveUntil: bigint): string {
+  return AbiCoder.defaultAbiCoder().encode(['address[]', 'uint256'], [fillers, exclusiveUntil])
 }
 
 export interface VaultOrderInput {
@@ -80,6 +80,9 @@ export interface VaultOrderInput {
   outputAmount: bigint
   preferredFiller: string
   taker: string
+  /** Full preferred-filler list; defaults to `[taker]`. Pass `[taker, executor]`
+   *  for an order fillable through the VaultOrderExecutor. */
+  fillers?: string[]
   exclusiveUntil?: bigint
 }
 
@@ -96,7 +99,7 @@ export function orderParams(o: VaultOrderInput): LimitOrderParams {
     recipient: o.vault as `0x${string}`,
     additionalValidationContract: o.preferredFiller as `0x${string}`,
     additionalValidationData: encodeValidationData(
-      o.taker,
+      o.fillers ?? [o.taker],
       o.exclusiveUntil ?? o.deadline
     ) as `0x${string}`,
   }

@@ -41,4 +41,5 @@ interface VaultErrors {
   error YieldNotLiquid();
   error UnknownVault();
   error UnsupportedOrder();
+  error CallerNotPreferredFiller();
 }

@@ -49,7 +49,10 @@ describe('AUDIT L-05 — SellFirstFeeController reverts fills whose fee rounds t
       outputToken: ctx.corridor.target as string,
       outputAmount: 1000n,
       preferredFiller: ctx.preferredFiller,
-      taker: executorAddr,
+      taker: ctx.other.address,
+      // fill() only lets a bound filler call it, so the caller must be listed
+      // for this to reach the fee hook the test is about.
+      fillers: [ctx.other.address, executorAddr],
     })
     await ctx.corridor.mint(ctx.other.address, cngn(1n))
     await ctx.corridor.connect(ctx.other).approve(executorAddr, ethers.MaxUint256)

@@ -68,7 +68,7 @@ describe('VaultPolicy', function () {
         nonce: 1n << 128n,
         deadline,
         additionalValidationContract: ctx.preferredFiller,
-        additionalValidationData: encodeValidationData(ctx.other.address, deadline),
+        additionalValidationData: encodeValidationData([ctx.other.address], deadline),
       },
       input: {
         token: await ctx.settlement.getAddress(),
@@ -100,7 +100,7 @@ describe('VaultPolicy', function () {
       [[], deadline]
     )
     expect(await ctx.harness.orderPolicyOk(order, ctxPolicy)).to.equal(false)
-    order.info.additionalValidationData = encodeValidationData(ctx.other.address, deadline)
+    order.info.additionalValidationData = encodeValidationData([ctx.other.address], deadline)
 
     order.info.reactor = ctx.other.address
     expect(await ctx.harness.orderPolicyOk(order, ctxPolicy)).to.equal(false)
@@ -157,7 +157,7 @@ describe('VaultPolicy', function () {
       ...order,
       info: {
         ...order.info,
-        additionalValidationData: encodeValidationData(ctx.other.address, deadline - 1n),
+        additionalValidationData: encodeValidationData([ctx.other.address], deadline - 1n),
       },
     }
     expect(await ctx.harness.orderPolicyOk(earlyBind, ctxPolicy)).to.equal(false)
@@ -187,7 +187,7 @@ describe('VaultPolicy', function () {
       [[ethers.ZeroAddress], deadline]
     )
     expect(await ctx.harness.orderPolicyOk(order, ctxPolicy)).to.equal(false)
-    order.info.additionalValidationData = encodeValidationData(ctx.other.address, deadline)
+    order.info.additionalValidationData = encodeValidationData([ctx.other.address], deadline)
     expect(await ctx.harness.orderPolicyOk(order, ctxPolicy)).to.equal(true)
   })
 
