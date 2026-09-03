@@ -70,4 +70,13 @@ interface IYieldAdapter {
   /// @param assets Position amount in underlying units.
   /// @return sent Amount actually transferred. Never more than `assets`.
   function transferHeld(address to, uint256 assets) external returns (uint256 sent);
+
+  /// @notice Recover a token force-sent to the adapter by pushing its full
+  ///         balance to the vault. Permissionless: the destination is fixed,
+  ///         so the call can only move value into the vault — underlying is
+  ///         socialised there, junk becomes guardian-sweepable — and the
+  ///         adapter needs no owner. Must reject the yield token, so the
+  ///         position itself is never skimmable.
+  /// @param token Token to recover. Must not be the yield token.
+  function skim(address token) external;
 }

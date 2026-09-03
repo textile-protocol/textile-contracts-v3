@@ -16,7 +16,8 @@ import { IAaveV3Pool } from "./IAaveV3Pool.sol";
  *         implementation per market; the factory clones it per vault and the
  *         vault binds the clone in its constructor, so there is no front-run
  *         window. The adapter holds only aTokens — never the vault's working
- *         balance — and has no sweep or admin surface.
+ *         balance — and has no admin surface: `skim` is its only recovery
+ *         path, and it can only push to the vault.
  */
 contract AaveV3YieldAdapter is IYieldAdapter {
   using SafeERC20 for IERC20;
@@ -34,6 +35,7 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   event AdapterInitialized(address indexed vault, address indexed asset, address indexed aToken);
   event Deployed(uint256 assets);
   event Recalled(uint256 requested, uint256 withdrawn);
+  event Skimmed(address indexed token, uint256 amount);
 
   modifier onlyVault() {
     if (msg.sender != vault) revert VaultErrors.NotAuthorized();
@@ -118,5 +120,18 @@ contract AaveV3YieldAdapter is IYieldAdapter {
     IERC20 token = aToken;
     sent = Math.min(assets, token.balanceOf(address(this)));
     token.safeTransfer(to, sent);
+  }
+
+  /// @inheritdoc IYieldAdapter
+  /// @dev Also refuses the implementation: it locks `vault` to itself, so a
+  ///      skim there would be a self-transfer reporting a recovery that never
+  ///      happened.
+  function skim(address token) external override {
+    address vault_ = vault;
+    if (vault_ == address(this) || token == address(aToken)) revert VaultErrors.InvalidPair();
+    uint256 amount = IERC20(token).balanceOf(address(this));
+    if (amount == 0) revert VaultErrors.ZeroAmount();
+    IERC20(token).safeTransfer(vault_, amount);
+    emit Skimmed(token, amount);
   }
 }
