@@ -15,8 +15,9 @@ import { VaultLib } from "../libraries/VaultLib.sol";
  *         attestation exists.
  */
 interface IOperatorVault {
-  /// @dev Emitted from VaultPolicy delegatecalls, so declared here to keep
-  ///      them in the vault ABI.
+  /// @dev Every vault event lives here: several are emitted from VaultPolicy
+  ///      delegatecalls and would otherwise be missing from the vault ABI,
+  ///      and one home beats two.
   event SettlementPrepared(uint256 needed, uint256 recalled);
   event IdleAllocated(uint256 assets);
   event IdleRecalled(uint256 assets);
@@ -25,6 +26,25 @@ interface IOperatorVault {
   event ClaimedYield(
     address indexed controller, address indexed receiver, uint256 indexed epochId, uint256 yieldOut
   );
+  event StrategySignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
+  event RiskSignerProposed(address indexed pending, uint256 applyAt);
+  event RiskSignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
+  event RiskSignerProposalCancelled(address indexed cancelled);
+  event OperatorAdminProposed(address indexed pending);
+  event OperatorAdminProposalCancelled(address indexed cancelled);
+  event OperatorAdminTransferred(address indexed previous, address indexed current);
+  event RiskAdminProposed(address indexed pending);
+  event RiskAdminProposalCancelled(address indexed cancelled);
+  event RiskAdminTransferred(address indexed previous, address indexed current);
+  event GuardianUpdated(address indexed previous, address indexed current);
+  event FeeRecipientUpdated(address indexed previous, address indexed current);
+  event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
+  event NavSettled(uint256 nav, uint256 timestamp);
+  event OperatorSet(address indexed account, address indexed operator, bool approved);
+  event Paused(address indexed guardian);
+  event Unpaused(address indexed guardian);
+  event TokenSwept(address indexed token, address indexed to, uint256 amount);
+  event ETHSwept(address indexed to, uint256 amount);
 
   function requestDeposit(uint256 assets, address controller, address owner)
     external
@@ -120,8 +140,16 @@ interface IOperatorVault {
 
   function settlementAsset() external view returns (IERC20);
   function corridorAsset() external view returns (IERC20);
+  function operatorAdmin() external view returns (address);
+  function pendingOperatorAdmin() external view returns (address);
   function strategySigner() external view returns (address);
+  function riskAdmin() external view returns (address);
+  function pendingRiskAdmin() external view returns (address);
   function riskSigner() external view returns (address);
+  function pendingRiskSigner() external view returns (address);
+  function pendingRiskSignerAt() external view returns (uint256);
+  function guardian() external view returns (address);
+  function feeRecipient() external view returns (address);
   function tradingEpoch() external view returns (uint256);
   function paused() external view returns (bool);
   function closeOnly() external view returns (bool);

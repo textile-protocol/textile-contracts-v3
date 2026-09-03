@@ -7,6 +7,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { Address } from "@openzeppelin/contracts/utils/Address.sol";
 
 import { LimitOrder } from "../../vendor/uniswapx/lib/LimitOrderLib.sol";
 import { OutputToken } from "../../vendor/uniswapx/base/ReactorStructs.sol";
@@ -14,6 +15,7 @@ import { OutputToken } from "../../vendor/uniswapx/base/ReactorStructs.sol";
 import { FillerConstants } from "../../FillerConstants.sol";
 
 import { IOperatorVault } from "../interfaces/IOperatorVault.sol";
+import { IOperatorVaultFactory } from "../interfaces/IOperatorVaultFactory.sol";
 import { IYieldAdapter } from "../interfaces/IYieldAdapter.sol";
 import { VaultErrors } from "./VaultErrors.sol";
 import { VaultLib } from "./VaultLib.sol";
@@ -78,6 +80,8 @@ library VaultPolicy {
     ) revert VaultErrors.ZeroAddress();
     if (address(cfg.settlementAsset) == address(cfg.corridorAsset)) revert VaultErrors.InvalidPair();
     if (cfg.strategySigner == cfg.riskSigner) revert VaultErrors.InvalidParams();
+    // Audit L-01, see `_requireDistinctAdmins`.
+    if (cfg.operatorAdmin == cfg.riskAdmin) revert VaultErrors.InvalidParams();
     if (
       cfg.maxOrderInputSettlement == 0 || cfg.maxOrderInputCorridor == 0 || cfg.maxOrderLifetime == 0
         || cfg.depositEpochDuration == 0 || cfg.redemptionEpochDuration == 0 || cfg.redemptionCloseCooldown == 0
@@ -294,6 +298,166 @@ library VaultPolicy {
     if (!VaultLib.isSigner(src.strategySigner(), hash, operatorSig)) return VaultLib.ERC1271_FAIL;
     if (!VaultLib.isSigner(src.riskSigner(), hash, riskSig)) return VaultLib.ERC1271_FAIL;
     return IERC1271.isValidSignature.selector;
+  }
+
+  /*//////////////////////////////////////////////////////////////
+              ADMIN LIFECYCLE (delegatecalled by the vault)
+  //////////////////////////////////////////////////////////////*/
+
+  function setStrategySigner(VaultTypes.Roles storage roles, address next, uint256 newTradingEpoch)
+    external
+  {
+    if (next == address(0)) revert VaultErrors.ZeroAddress();
+    if (next == roles.riskSigner || next == roles.pendingRiskSigner) revert VaultErrors.InvalidParams();
+    address previous = roles.strategySigner;
+    roles.strategySigner = next;
+    emit IOperatorVault.StrategySignerRotated(previous, next, newTradingEpoch);
+  }
+
+  /// @notice Zero withdraws the pending proposal (audit L-03), so a signer
+  ///         the admin no longer wants cannot be activated by a third party
+  ///         once the delay elapses.
+  function proposeRiskSigner(VaultTypes.Roles storage roles, address next, uint256 delay) external {
+    if (next == address(0)) {
+      if (!_clearPendingRiskSigner(roles)) revert VaultErrors.InvalidParams();
+      return;
+    }
+    if (next == roles.strategySigner) revert VaultErrors.InvalidParams();
+    // `delay` passed `_requireSafeDuration`, so the sum fits well inside uint96.
+    uint96 applyAt = uint96(block.timestamp + delay);
+    roles.pendingRiskSigner = next;
+    roles.pendingRiskSignerAt = applyAt;
+    emit IOperatorVault.RiskSignerProposed(next, applyAt);
+  }
+
+  function acceptRiskSigner(VaultTypes.Roles storage roles, uint256 newTradingEpoch) external {
+    address next = roles.pendingRiskSigner;
+    if (next == address(0) || next == roles.strategySigner) revert VaultErrors.InvalidParams();
+    if (block.timestamp < roles.pendingRiskSignerAt) revert VaultErrors.RotationDelayPending();
+    address previous = roles.riskSigner;
+    roles.riskSigner = next;
+    roles.pendingRiskSigner = address(0);
+    roles.pendingRiskSignerAt = 0;
+    emit IOperatorVault.RiskSignerRotated(previous, next, newTradingEpoch);
+  }
+
+  /// @notice Two-step handover (audit L-01): nothing changes until the
+  ///         proposed key calls `acceptOperatorAdmin`; zero withdraws the
+  ///         proposal, so a mistyped one does not stay acceptable forever.
+  function proposeOperatorAdmin(VaultTypes.Roles storage roles, address next) external {
+    address pending = roles.pendingOperatorAdmin;
+    _checkProposal(roles, next, pending);
+    roles.pendingOperatorAdmin = next;
+    if (next == address(0)) emit IOperatorVault.OperatorAdminProposalCancelled(pending);
+    else emit IOperatorVault.OperatorAdminProposed(next);
+  }
+
+  /// @dev Delegatecalled, so `msg.sender` is the account accepting and the
+  ///      factory rekey is made from the vault address.
+  function acceptOperatorAdmin(
+    VaultTypes.Roles storage roles,
+    address factory,
+    address settlementAsset,
+    address corridorAsset
+  ) external {
+    address next = _acceptable(roles, roles.pendingOperatorAdmin);
+    roles.pendingOperatorAdmin = address(0);
+    address previous = roles.operatorAdmin;
+    roles.operatorAdmin = next;
+    IOperatorVaultFactory(factory).rekeyOperator(previous, next, settlementAsset, corridorAsset);
+    emit IOperatorVault.OperatorAdminTransferred(previous, next);
+  }
+
+  /// @notice Same handover shape as `proposeOperatorAdmin`, zero-cancel included.
+  function proposeRiskAdmin(VaultTypes.Roles storage roles, address next) external {
+    address pending = roles.pendingRiskAdmin;
+    _checkProposal(roles, next, pending);
+    roles.pendingRiskAdmin = next;
+    if (next == address(0)) emit IOperatorVault.RiskAdminProposalCancelled(pending);
+    else emit IOperatorVault.RiskAdminProposed(next);
+  }
+
+  function acceptRiskAdmin(VaultTypes.Roles storage roles) external {
+    address next = _acceptable(roles, roles.pendingRiskAdmin);
+    roles.pendingRiskAdmin = address(0);
+    // A new risk admin must not inherit the outgoing admin's pending signer.
+    _clearPendingRiskSigner(roles);
+    emit IOperatorVault.RiskAdminTransferred(roles.riskAdmin, next);
+    roles.riskAdmin = next;
+  }
+
+  function setGuardian(VaultTypes.Roles storage roles, address next) external {
+    if (next == address(0)) revert VaultErrors.ZeroAddress();
+    emit IOperatorVault.GuardianUpdated(roles.guardian, next);
+    roles.guardian = next;
+  }
+
+  /// @notice Guardian sweep of a non-working ERC-20. Delegatecalled, so the
+  ///         balance and transfer are the vault's own.
+  function sweepToken(
+    address token,
+    address to,
+    address settlementAsset,
+    address corridorAsset,
+    address yieldToken
+  ) external {
+    if (to == address(0)) revert VaultErrors.ZeroAddress();
+    // The aToken (H-01) stays unsweepable alongside the pair and the shares.
+    // `yieldToken` is zero when yield is off; sweeping token(0) is nonsense
+    // either way, so that comparison needs no zero-guard.
+    if (
+      token == address(this) || token == settlementAsset || token == corridorAsset || token == yieldToken
+    ) revert VaultErrors.InvalidPair();
+    uint256 amount = IERC20(token).balanceOf(address(this));
+    if (amount == 0) revert VaultErrors.ZeroAmount();
+    IERC20(token).safeTransfer(to, amount);
+    emit IOperatorVault.TokenSwept(token, to, amount);
+  }
+
+  /// @notice Guardian sweep of forced-in ETH.
+  function sweepETH(address payable to) external {
+    if (to == address(0)) revert VaultErrors.ZeroAddress();
+    if (to == address(this)) revert VaultErrors.InvalidParams();
+    uint256 amount = address(this).balance;
+    if (amount == 0) revert VaultErrors.ZeroAmount();
+    Address.sendValue(to, amount);
+    emit IOperatorVault.ETHSwept(to, amount);
+  }
+
+  /// @dev A proposal either withdraws the pending one (zero, which needs one
+  ///      to exist) or names a fresh key that keeps the two admin roles apart.
+  function _checkProposal(VaultTypes.Roles storage roles, address next, address pending) private view {
+    if (next == address(0)) {
+      if (pending == address(0)) revert VaultErrors.InvalidParams();
+    } else {
+      _requireDistinctAdmins(roles, next);
+    }
+  }
+
+  /// @dev Only the proposed key can accept, and the separation is re-checked
+  ///      here because the other admin role may have changed since the proposal.
+  function _acceptable(VaultTypes.Roles storage roles, address pending) private view returns (address) {
+    if (msg.sender != pending) revert VaultErrors.NotAuthorized();
+    _requireDistinctAdmins(roles, pending);
+    return pending;
+  }
+
+  /// @dev The L-01 invariant: one entity holding both admin roles could rotate
+  ///      both signers and collapse the dual-signature model to a single party.
+  ///      `validateConfig` enforces the same rule on the deploy payload.
+  function _requireDistinctAdmins(VaultTypes.Roles storage roles, address next) private view {
+    if (next == roles.operatorAdmin || next == roles.riskAdmin) revert VaultErrors.InvalidParams();
+  }
+
+  /// @dev Emits the cancellation so an event-driven monitor never keeps a
+  ///      signer and activation time the chain has already dropped.
+  function _clearPendingRiskSigner(VaultTypes.Roles storage roles) private returns (bool cleared) {
+    address pending = roles.pendingRiskSigner;
+    if (pending == address(0)) return false;
+    roles.pendingRiskSigner = address(0);
+    roles.pendingRiskSignerAt = 0;
+    emit IOperatorVault.RiskSignerProposalCancelled(pending);
+    return true;
   }
 
   function verifyAttestation(

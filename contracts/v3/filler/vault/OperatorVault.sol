@@ -6,7 +6,6 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
-import { Address } from "@openzeppelin/contracts/utils/Address.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IOperatorVault } from "./interfaces/IOperatorVault.sol";
@@ -25,7 +24,7 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
  *         redemptions settle in aggregate epochs. One closed redemption at a
  *         time; pause is an orthogonal flag over derived close-only mode.
  */
-contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
+contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, VaultErrors {
   using SafeERC20 for IERC20;
 
   enum EpochState {
@@ -87,14 +86,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   ///         value is `yieldAdapter().yieldToken()` off-chain.
   address internal immutable yieldToken;
 
-  address public operatorAdmin;
-  address public strategySigner;
-  address public riskAdmin;
-  address public riskSigner;
-  address public pendingRiskSigner;
-  uint256 public pendingRiskSignerAt;
-  address public guardian;
-  address public feeRecipient;
+  VaultTypes.Roles private _roles;
 
   bool public override paused;
   uint256 public override tradingEpoch;
@@ -155,33 +147,19 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     uint256 settlementOut,
     uint256 corridorOut
   );
-  event Paused(address indexed guardian);
-  event Unpaused(address indexed guardian);
-  event StrategySignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
-  event RiskSignerProposed(address indexed pending, uint256 applyAt);
-  event RiskSignerRotated(address indexed previous, address indexed current, uint256 tradingEpoch);
-  event OperatorAdminTransferred(address indexed previous, address indexed current);
-  event RiskAdminTransferred(address indexed previous, address indexed current);
-  event GuardianUpdated(address indexed previous, address indexed current);
-  event FeeRecipientUpdated(address indexed previous, address indexed current);
-  event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
-  event NavSettled(uint256 nav, uint256 timestamp);
-  event OperatorSet(address indexed account, address indexed operator, bool approved);
-  event TokenSwept(address indexed token, address indexed to, uint256 amount);
-  event ETHSwept(address indexed to, uint256 amount);
 
   modifier onlyOperatorAdmin() {
-    if (msg.sender != operatorAdmin) revert VaultErrors.NotAuthorized();
+    if (msg.sender != _roles.operatorAdmin) revert VaultErrors.NotAuthorized();
     _;
   }
 
   modifier onlyRiskAdmin() {
-    if (msg.sender != riskAdmin) revert VaultErrors.NotAuthorized();
+    if (msg.sender != _roles.riskAdmin) revert VaultErrors.NotAuthorized();
     _;
   }
 
   modifier onlyGuardian() {
-    if (msg.sender != guardian) revert VaultErrors.NotAuthorized();
+    if (msg.sender != _roles.guardian) revert VaultErrors.NotAuthorized();
     _;
   }
 
@@ -213,12 +191,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     yieldAdapter = IYieldAdapter(cfg.yieldAdapter);
     minLiquidSettlement = cfg.minLiquidSettlement;
 
-    operatorAdmin = cfg.operatorAdmin;
-    strategySigner = cfg.strategySigner;
-    riskAdmin = cfg.riskAdmin;
-    riskSigner = cfg.riskSigner;
-    guardian = cfg.guardian;
-    feeRecipient = cfg.feeRecipient;
+    _roles.operatorAdmin = cfg.operatorAdmin;
+    _roles.strategySigner = cfg.strategySigner;
+    _roles.riskAdmin = cfg.riskAdmin;
+    _roles.riskSigner = cfg.riskSigner;
+    _roles.guardian = cfg.guardian;
+    _roles.feeRecipient = cfg.feeRecipient;
 
     tradingEpoch = 1;
     nextEpochId = 1;
@@ -307,7 +285,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
       return;
     }
 
-    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), riskSigner);
+    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
     _checkpointFee();
 
     uint256 supply = totalSupply();
@@ -634,52 +612,38 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   }
 
   function setStrategySigner(address next) external onlyOperatorAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    if (next == riskSigner || next == pendingRiskSigner) revert VaultErrors.InvalidParams();
-    address previous = strategySigner;
-    strategySigner = next;
-    _bumpTradingEpoch();
-    emit StrategySignerRotated(previous, next, tradingEpoch);
+    VaultPolicy.setStrategySigner(_roles, next, _bumpTradingEpoch());
   }
 
+  /// @notice Proposing the zero address withdraws the pending proposal.
   function proposeRiskSigner(address next) external onlyRiskAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    if (next == strategySigner) revert VaultErrors.InvalidParams();
-    pendingRiskSigner = next;
-    pendingRiskSignerAt = block.timestamp + riskSignerDelay;
-    emit RiskSignerProposed(next, pendingRiskSignerAt);
+    VaultPolicy.proposeRiskSigner(_roles, next, riskSignerDelay);
   }
 
   function acceptRiskSigner() external {
-    if (pendingRiskSigner == address(0)) revert VaultErrors.InvalidParams();
-    if (pendingRiskSigner == strategySigner) revert VaultErrors.InvalidParams();
-    if (block.timestamp < pendingRiskSignerAt) revert VaultErrors.RotationDelayPending();
-    address previous = riskSigner;
-    address next = pendingRiskSigner;
-    riskSigner = next;
-    pendingRiskSigner = address(0);
-    pendingRiskSignerAt = 0;
-    _bumpTradingEpoch();
-    emit RiskSignerRotated(previous, next, tradingEpoch);
+    VaultPolicy.acceptRiskSigner(_roles, _bumpTradingEpoch());
   }
 
+  /// @notice Two-step transfer: the new admin must accept, so a fat-finger or
+  ///         hostile proposal cannot hand control over irrevocably. Proposing
+  ///         the zero address withdraws the pending proposal.
   function transferOperatorAdmin(address next) external onlyOperatorAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    address previous = operatorAdmin;
-    if (next == previous) revert VaultErrors.InvalidParams();
-    IOperatorVaultFactory(factory).rekeyOperator(
-      previous, next, address(settlementAsset), address(corridorAsset)
-    );
-    operatorAdmin = next;
-    emit OperatorAdminTransferred(previous, next);
+    VaultPolicy.proposeOperatorAdmin(_roles, next);
   }
 
+  function acceptOperatorAdmin() external {
+    VaultPolicy.acceptOperatorAdmin(
+      _roles, factory, address(settlementAsset), address(corridorAsset)
+    );
+  }
+
+  /// @notice Two-step transfer, mirroring `transferOperatorAdmin`.
   function transferRiskAdmin(address next) external onlyRiskAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    pendingRiskSigner = address(0);
-    pendingRiskSignerAt = 0;
-    emit RiskAdminTransferred(riskAdmin, next);
-    riskAdmin = next;
+    VaultPolicy.proposeRiskAdmin(_roles, next);
+  }
+
+  function acceptRiskAdmin() external {
+    VaultPolicy.acceptRiskAdmin(_roles);
   }
 
   /// @inheritdoc IOperatorVault
@@ -689,40 +653,23 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
 
   /// @inheritdoc IOperatorVault
   function sweepToken(address token, address to) external override onlyGuardian nonReentrant {
-    if (to == address(0)) revert VaultErrors.ZeroAddress();
-    // yieldToken is zero when yield is off; sweeping token(0) is nonsense
-    // either way, so the fourth comparison needs no zero-guard.
-    if (
-      token == address(this) || token == address(settlementAsset) || token == address(corridorAsset)
-        || token == yieldToken
-    ) revert VaultErrors.InvalidPair();
-    uint256 amount = IERC20(token).balanceOf(address(this));
-    if (amount == 0) revert VaultErrors.ZeroAmount();
-    IERC20(token).safeTransfer(to, amount);
-    emit TokenSwept(token, to, amount);
+    VaultPolicy.sweepToken(token, to, address(settlementAsset), address(corridorAsset), yieldToken);
   }
 
   /// @inheritdoc IOperatorVault
   function sweepETH(address payable to) external override onlyGuardian nonReentrant {
-    if (to == address(0)) revert VaultErrors.ZeroAddress();
-    if (to == address(this)) revert VaultErrors.InvalidParams();
-    uint256 amount = address(this).balance;
-    if (amount == 0) revert VaultErrors.ZeroAmount();
-    Address.sendValue(to, amount);
-    emit ETHSwept(to, amount);
+    VaultPolicy.sweepETH(to);
   }
 
   function setGuardian(address next) external onlyOperatorAdmin {
-    if (next == address(0)) revert VaultErrors.ZeroAddress();
-    emit GuardianUpdated(guardian, next);
-    guardian = next;
+    VaultPolicy.setGuardian(_roles, next);
   }
 
   function setFeeRecipient(address next) external onlyOperatorAdmin nonReentrant {
     if (next == address(0)) revert VaultErrors.ZeroAddress();
     _checkpointFee();
-    emit FeeRecipientUpdated(feeRecipient, next);
-    feeRecipient = next;
+    emit FeeRecipientUpdated(_roles.feeRecipient, next);
+    _roles.feeRecipient = next;
   }
 
   function setOperator(address operator, bool approved) external override returns (bool) {
@@ -735,6 +682,46 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
   /*//////////////////////////////////////////////////////////////
                                 VIEWS
   //////////////////////////////////////////////////////////////*/
+
+  function operatorAdmin() public view override returns (address) {
+    return _roles.operatorAdmin;
+  }
+
+  function pendingOperatorAdmin() external view override returns (address) {
+    return _roles.pendingOperatorAdmin;
+  }
+
+  function strategySigner() public view override returns (address) {
+    return _roles.strategySigner;
+  }
+
+  function riskAdmin() public view override returns (address) {
+    return _roles.riskAdmin;
+  }
+
+  function pendingRiskAdmin() external view override returns (address) {
+    return _roles.pendingRiskAdmin;
+  }
+
+  function riskSigner() public view override returns (address) {
+    return _roles.riskSigner;
+  }
+
+  function pendingRiskSigner() external view override returns (address) {
+    return _roles.pendingRiskSigner;
+  }
+
+  function pendingRiskSignerAt() external view override returns (uint256) {
+    return _roles.pendingRiskSignerAt;
+  }
+
+  function guardian() public view override returns (address) {
+    return _roles.guardian;
+  }
+
+  function feeRecipient() public view override returns (address) {
+    return _roles.feeRecipient;
+  }
 
   /// @inheritdoc IOperatorVault
   function closeOnly() public view override returns (bool) {
@@ -857,8 +844,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     lastFeeCheckpoint = block.timestamp;
     uint256 shares = VaultLib.feeShares(totalSupply(), managementFeeWad, elapsed);
     if (shares == 0) return;
-    _mint(feeRecipient, shares);
-    emit FeeAccrued(feeRecipient, shares, elapsed);
+    address recipient = _roles.feeRecipient;
+    _mint(recipient, shares);
+    emit FeeAccrued(recipient, shares, elapsed);
   }
 
   /// @dev `startedAt` is always a past block timestamp, so the subtraction
@@ -867,9 +855,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     return block.timestamp - startedAt >= duration;
   }
 
-  function _bumpTradingEpoch() private {
+  function _bumpTradingEpoch() private returns (uint256 epoch) {
     unchecked {
-      ++tradingEpoch;
+      epoch = ++tradingEpoch;
     }
   }
 
@@ -976,7 +964,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault {
     returns (uint256 price, uint256 supply, uint256 conversionNav, uint256 freeS, uint256 freeC)
   {
     _recallAll();
-    price = VaultPolicy.verifyAttestation(att, sig, epochId, address(this), riskSigner);
+    price = VaultPolicy.verifyAttestation(att, sig, epochId, address(this), _roles.riskSigner);
     _checkpointFee();
     supply = totalSupply();
     (conversionNav, freeS, freeC) = _requireLiveNav(att, price);

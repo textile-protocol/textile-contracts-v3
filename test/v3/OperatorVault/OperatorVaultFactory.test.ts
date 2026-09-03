@@ -93,6 +93,10 @@ describe('OperatorVaultFactory', function () {
     await deployed.vault
       .connect(deployed.operatorAdmin)
       .transferOperatorAdmin(deployed.other.address)
+    // Two-step (audit L-01): nothing rekeys until the new admin accepts.
+    expect(await deployed.factory.vaultOf(deployed.operatorAdmin.address, settlement, corridor))
+      .to.equal(vaultAddr)
+    await deployed.vault.connect(deployed.other).acceptOperatorAdmin()
 
     expect(await deployed.factory.vaultOf(deployed.operatorAdmin.address, settlement, corridor))
       .to.equal(ethers.ZeroAddress)
@@ -112,8 +116,10 @@ describe('OperatorVaultFactory', function () {
     taken.corridorAsset = corridor
     taken.operatorAdmin = deployed.lp1.address
     await deployed.factory.connect(deployed.lp1).deployVault(taken)
+    // The clash with lp1's own vault surfaces at accept time.
+    await deployed.vault.connect(deployed.other).transferOperatorAdmin(deployed.lp1.address)
     await expect(
-      deployed.vault.connect(deployed.other).transferOperatorAdmin(deployed.lp1.address)
+      deployed.vault.connect(deployed.lp1).acceptOperatorAdmin()
     ).to.be.revertedWithCustomError(deployed.factory, 'DuplicateVault')
   })
 

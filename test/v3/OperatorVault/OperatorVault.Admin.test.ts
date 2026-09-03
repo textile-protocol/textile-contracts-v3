@@ -49,23 +49,62 @@ describe('OperatorVault — admin, pause, signers', function () {
     expect(await vault.tradingEpoch()).to.equal(before + 1n)
   })
 
-  it('clears a pending risk-signer proposal when risk admin transfers', async function () {
+  it('clears a pending risk-signer proposal when the risk admin hands over', async function () {
     const { vault, riskAdmin, other, lp1 } = await deployOperatorVault()
     await vault.connect(riskAdmin).proposeRiskSigner(other.address)
     await vault.connect(riskAdmin).transferRiskAdmin(lp1.address)
+    // Pending signer survives the proposal; it clears (audibly) when lp1 accepts.
+    expect(await vault.pendingRiskSigner()).to.equal(other.address)
+    await expect(vault.connect(lp1).acceptRiskAdmin())
+      .to.emit(vault, 'RiskSignerProposalCancelled')
+      .withArgs(other.address)
+    expect(await vault.riskAdmin()).to.equal(lp1.address)
     expect(await vault.pendingRiskSigner()).to.equal(ethers.ZeroAddress)
     expect(await vault.pendingRiskSignerAt()).to.equal(0)
-    await time.increase(DAY)
-    await expect(vault.acceptRiskSigner()).to.be.revertedWithCustomError(vault, 'InvalidParams')
   })
 
-  it('transfers admin roles and updates guardian and fee recipient', async function () {
-    const { vault, operatorAdmin, riskAdmin, other, guardian, feeRecipient } =
+  it('withdraws a pending signer proposal when zero is proposed', async function () {
+    const { vault, riskAdmin, other, lp1 } = await deployOperatorVault()
+    // Nothing pending: zero reverts rather than silently succeeding.
+    await expect(
+      vault.connect(riskAdmin).proposeRiskSigner(ethers.ZeroAddress)
+    ).to.be.revertedWithCustomError(vault, 'InvalidParams')
+    await vault.connect(riskAdmin).proposeRiskSigner(other.address)
+    await time.increase(DAY)
+    // Without a cancel, anyone could activate the proposal now (audit L-03).
+    await expect(vault.connect(riskAdmin).proposeRiskSigner(ethers.ZeroAddress))
+      .to.emit(vault, 'RiskSignerProposalCancelled')
+      .withArgs(other.address)
+    expect(await vault.pendingRiskSigner()).to.equal(ethers.ZeroAddress)
+    expect(await vault.pendingRiskSignerAt()).to.equal(0)
+    await expect(vault.connect(lp1).acceptRiskSigner()).to.be.revertedWithCustomError(
+      vault,
+      'InvalidParams'
+    )
+  })
+
+  it('transfers admin roles two-step and updates guardian and fee recipient', async function () {
+    const { vault, operatorAdmin, riskAdmin, other, lp1, guardian, feeRecipient } =
       await deployOperatorVault()
+    // Operator admin: propose, then the new admin accepts (audit L-01).
     await vault.connect(operatorAdmin).transferOperatorAdmin(other.address)
+    expect(await vault.operatorAdmin()).to.equal(operatorAdmin.address)
+    await expect(vault.connect(lp1).acceptOperatorAdmin()).to.be.revertedWithCustomError(
+      vault,
+      'NotAuthorized'
+    )
+    await expect(vault.connect(other).acceptOperatorAdmin())
+      .to.emit(vault, 'OperatorAdminTransferred')
+      .withArgs(operatorAdmin.address, other.address)
     expect(await vault.operatorAdmin()).to.equal(other.address)
-    await vault.connect(riskAdmin).transferRiskAdmin(other.address)
-    expect(await vault.riskAdmin()).to.equal(other.address)
+    expect(await vault.pendingOperatorAdmin()).to.equal(ethers.ZeroAddress)
+
+    // Risk admin: same two-step shape.
+    await vault.connect(riskAdmin).transferRiskAdmin(lp1.address)
+    expect(await vault.riskAdmin()).to.equal(riskAdmin.address)
+    await vault.connect(lp1).acceptRiskAdmin()
+    expect(await vault.riskAdmin()).to.equal(lp1.address)
+
     await vault.connect(other).setGuardian(guardian.address)
     await vault.connect(other).setFeeRecipient(feeRecipient.address)
     await expect(vault.connect(other).setGuardian(ethers.ZeroAddress)).to.be.revertedWithCustomError(
@@ -74,10 +113,66 @@ describe('OperatorVault — admin, pause, signers', function () {
     )
     await expect(vault.connect(other).setFeeRecipient(ethers.ZeroAddress)).to.be
       .revertedWithCustomError(vault, 'ZeroAddress')
-    await expect(vault.connect(other).transferOperatorAdmin(ethers.ZeroAddress)).to.be
-      .revertedWithCustomError(vault, 'ZeroAddress')
-    await expect(vault.connect(other).transferRiskAdmin(ethers.ZeroAddress)).to.be
-      .revertedWithCustomError(vault, 'ZeroAddress')
+  })
+
+  it('withdraws a pending admin proposal when zero is proposed', async function () {
+    const { vault, operatorAdmin, riskAdmin, other, lp1 } = await deployOperatorVault()
+    // Nothing pending: zero is a no-op that reverts rather than a silent success.
+    await expect(
+      vault.connect(operatorAdmin).transferOperatorAdmin(ethers.ZeroAddress)
+    ).to.be.revertedWithCustomError(vault, 'InvalidParams')
+    await expect(
+      vault.connect(riskAdmin).transferRiskAdmin(ethers.ZeroAddress)
+    ).to.be.revertedWithCustomError(vault, 'InvalidParams')
+
+    await vault.connect(operatorAdmin).transferOperatorAdmin(other.address)
+    await expect(vault.connect(operatorAdmin).transferOperatorAdmin(ethers.ZeroAddress))
+      .to.emit(vault, 'OperatorAdminProposalCancelled')
+      .withArgs(other.address)
+    expect(await vault.pendingOperatorAdmin()).to.equal(ethers.ZeroAddress)
+    await expect(vault.connect(other).acceptOperatorAdmin()).to.be.revertedWithCustomError(
+      vault,
+      'NotAuthorized'
+    )
+
+    await vault.connect(riskAdmin).transferRiskAdmin(lp1.address)
+    await expect(vault.connect(riskAdmin).transferRiskAdmin(ethers.ZeroAddress))
+      .to.emit(vault, 'RiskAdminProposalCancelled')
+      .withArgs(lp1.address)
+    expect(await vault.pendingRiskAdmin()).to.equal(ethers.ZeroAddress)
+    await expect(vault.connect(lp1).acceptRiskAdmin()).to.be.revertedWithCustomError(
+      vault,
+      'NotAuthorized'
+    )
+
+    // A fresh proposal supersedes the previous one outright.
+    await vault.connect(operatorAdmin).transferOperatorAdmin(other.address)
+    await vault.connect(operatorAdmin).transferOperatorAdmin(lp1.address)
+    await expect(vault.connect(other).acceptOperatorAdmin()).to.be.revertedWithCustomError(
+      vault,
+      'NotAuthorized'
+    )
+    await vault.connect(lp1).acceptOperatorAdmin()
+    expect(await vault.operatorAdmin()).to.equal(lp1.address)
+  })
+
+  it('keeps the operator and risk admin roles separate', async function () {
+    const { vault, operatorAdmin, riskAdmin, other } = await deployOperatorVault()
+    // Proposing the other role's holder is rejected outright.
+    await expect(
+      vault.connect(operatorAdmin).transferOperatorAdmin(riskAdmin.address)
+    ).to.be.revertedWithCustomError(vault, 'InvalidParams')
+    await expect(
+      vault.connect(riskAdmin).transferRiskAdmin(operatorAdmin.address)
+    ).to.be.revertedWithCustomError(vault, 'InvalidParams')
+    // And a role change between proposal and accept is re-checked at accept.
+    await vault.connect(operatorAdmin).transferOperatorAdmin(other.address)
+    await vault.connect(riskAdmin).transferRiskAdmin(other.address)
+    await vault.connect(other).acceptRiskAdmin()
+    await expect(vault.connect(other).acceptOperatorAdmin()).to.be.revertedWithCustomError(
+      vault,
+      'InvalidParams'
+    )
   })
 
   it('rejects admin calls from the wrong role', async function () {
@@ -115,12 +210,6 @@ describe('OperatorVault — admin, pause, signers', function () {
     await expect(
       vault.connect(operatorAdmin).setStrategySigner(other.address)
     ).to.be.revertedWithCustomError(vault, 'InvalidParams')
-  })
-
-  it('rejects a zero pending risk signer', async function () {
-    const { vault, riskAdmin } = await deployOperatorVault()
-    await expect(vault.connect(riskAdmin).proposeRiskSigner(ethers.ZeroAddress)).to.be
-      .revertedWithCustomError(vault, 'ZeroAddress')
   })
 
   it('returns the ERC-1271 fail magic while paused', async function () {

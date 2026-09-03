@@ -4,7 +4,11 @@ pragma solidity 0.8.30;
 
 /// @notice Custom errors for OperatorVault, OperatorVaultFactory, the yield
 ///         adapters, and VaultOrderExecutor.
-library VaultErrors {
+/// @dev An interface rather than a library so `OperatorVault` can inherit it:
+///      errors raised inside delegatecalled `VaultPolicy` code are invisible
+///      to the compiler's ABI tracing, and inheriting the definitions (no
+///      runtime code) keeps the whole vocabulary in the vault ABI.
+interface VaultErrors {
   error ZeroAddress();
   error ZeroAmount();
   error InvalidPair();
