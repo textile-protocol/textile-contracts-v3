@@ -26,8 +26,12 @@ library VaultTypes {
   }
 
   /// @notice Caller-supplied vault configuration. Factory fills reactor, Permit2,
-  ///         PreferredFillerValidation, and implementation version.
+  ///         PreferredFillerValidation, and implementation version; the share
+  ///         token strings go to the constructor beside the config.
   struct VaultInit {
+    /// @dev ERC-20 name and symbol of the share token, chosen by the operator.
+    string name;
+    string symbol;
     IERC20 settlementAsset;
     IERC20 corridorAsset;
     address operatorAdmin;
@@ -44,12 +48,14 @@ library VaultTypes {
     uint256 depositEpochDuration;
     uint256 redemptionEpochDuration;
     uint256 redemptionCloseCooldown;
-    uint256 inKindExitTimeout;
     uint256 emergencyExitTimeout;
     uint256 valuationTimeout;
     uint256 managementFeeWad;
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
+    /// @dev Minimum corridor-asset deposit, in corridor atomic units. Zero
+    ///      disables corridor deposits for the vault's whole life.
+    uint256 minDepositCorridor;
     uint256 minRedeemShares;
     bool enableYield;
     uint256 minLiquidSettlement;
@@ -76,12 +82,12 @@ library VaultTypes {
     uint256 depositEpochDuration;
     uint256 redemptionEpochDuration;
     uint256 redemptionCloseCooldown;
-    uint256 inKindExitTimeout;
     uint256 emergencyExitTimeout;
     uint256 valuationTimeout;
     uint256 managementFeeWad;
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
+    uint256 minDepositCorridor;
     uint256 minRedeemShares;
     address yieldAdapter;
     uint256 minLiquidSettlement;

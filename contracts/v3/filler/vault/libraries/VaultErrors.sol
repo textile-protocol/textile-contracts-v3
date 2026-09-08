@@ -15,6 +15,7 @@ interface VaultErrors {
   error InvalidParams();
   error InvalidDecimals();
   error BelowMinSize();
+  error CorridorDepositsDisabled();
   error EnforcedPause();
   error NotAuthorized();
   error EpochNotOpen();
@@ -27,13 +28,11 @@ interface VaultErrors {
   error InsufficientSettlement();
   error TimeoutNotReached();
   error PauseRequired();
-  error SurplusRequiresInKind();
   error InvalidAttestation();
   error InconsistentNav();
   error TransferMismatch();
   error PreviewUnsupported();
   error RotationDelayPending();
-  error DuplicateVault();
   error AlreadyClaimed();
   error NothingToClaim();
   error AlreadyInitialized();

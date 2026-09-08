@@ -12,12 +12,18 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
 
 /**
  * @title OperatorVaultFactory
- * @notice Deploys immutable OperatorVault bytecode. One vault per
- *         (operatorAdmin, settlement, corridor, version) tuple. Holds no
- *         assets and has no upgrade authority over deployed vaults.
+ * @notice Deploys immutable OperatorVault bytecode. An operator may hold any
+ *         number of vaults for the same (settlement, corridor) pair — a pair
+ *         is a market, not a slot, and one operator running two books on it
+ *         (different caps, epochs or risk signer) is an ordinary thing to
+ *         want. The factory indexes them per (operatorAdmin, settlement,
+ *         corridor, version) tuple in deployment order. Holds no assets and
+ *         has no upgrade authority over deployed vaults.
  */
 contract OperatorVaultFactory is IOperatorVaultFactory {
   uint256 public constant VERSION = 1;
+  uint256 public constant MAX_NAME_BYTES = 64;
+  uint256 public constant MAX_SYMBOL_BYTES = 16;
 
   address public immutable reactor;
   address public immutable permit2;
@@ -26,7 +32,10 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   ///         factory cannot enable idle yield.
   address public immutable yieldAdapterImplementation;
 
-  mapping(bytes32 => address) private _vaultOf;
+  /// @dev Vaults per (operatorAdmin, settlement, corridor, VERSION), oldest
+  ///      first. Append-only apart from `rekeyOperator`, which moves a single
+  ///      entry from one key's list to another's.
+  mapping(bytes32 => address[]) private _vaultsOf;
   mapping(address => bool) public override isVault;
 
   event VaultDeployed(
@@ -35,7 +44,9 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     address indexed settlementAsset,
     address corridorAsset,
     address strategySigner,
-    uint256 version
+    uint256 version,
+    string name,
+    string symbol
   );
   event VaultRekeyed(
     address indexed vault,
@@ -63,8 +74,9 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   /// @inheritdoc IOperatorVaultFactory
   function deployVault(VaultTypes.VaultInit calldata init) external returns (address vault) {
     if (msg.sender != init.operatorAdmin) revert VaultErrors.NotAuthorized();
+    _requireLabel(init.name, MAX_NAME_BYTES);
+    _requireLabel(init.symbol, MAX_SYMBOL_BYTES);
     bytes32 key = _key(init.operatorAdmin, address(init.settlementAsset), address(init.corridorAsset));
-    if (_vaultOf[key] != address(0)) revert VaultErrors.DuplicateVault();
 
     address adapter;
     if (init.enableYield) {
@@ -92,25 +104,25 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       depositEpochDuration: init.depositEpochDuration,
       redemptionEpochDuration: init.redemptionEpochDuration,
       redemptionCloseCooldown: init.redemptionCloseCooldown,
-      inKindExitTimeout: init.inKindExitTimeout,
       emergencyExitTimeout: init.emergencyExitTimeout,
       valuationTimeout: init.valuationTimeout,
       managementFeeWad: init.managementFeeWad,
       riskSignerDelay: init.riskSignerDelay,
       minDepositAssets: init.minDepositAssets,
+      minDepositCorridor: init.minDepositCorridor,
       minRedeemShares: init.minRedeemShares,
       yieldAdapter: adapter,
       minLiquidSettlement: init.minLiquidSettlement,
       version: VERSION
     });
 
-    vault = VaultDeployer.deploy(cfg);
+    vault = VaultDeployer.deploy(cfg, init.name, init.symbol);
     // Defense in depth: unreachable today (the vault constructor binds the
     // clone or reverts), but pins the invariant if the constructor changes.
     if (adapter != address(0) && IYieldAdapter(adapter).vault() != vault) {
       revert VaultErrors.InvalidParams();
     }
-    _vaultOf[key] = vault;
+    _vaultsOf[key].push(vault);
     isVault[vault] = true;
 
     emit VaultDeployed(
@@ -119,7 +131,9 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       address(init.settlementAsset),
       address(init.corridorAsset),
       init.strategySigner,
-      VERSION
+      VERSION,
+      init.name,
+      init.symbol
     );
   }
 
@@ -129,7 +143,26 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     view
     returns (address)
   {
-    return _vaultOf[_key(operatorAdmin, settlementAsset, corridorAsset)];
+    address[] storage vaults = _vaultsOf[_key(operatorAdmin, settlementAsset, corridorAsset)];
+    return vaults.length == 0 ? address(0) : vaults[vaults.length - 1];
+  }
+
+  /// @inheritdoc IOperatorVaultFactory
+  function vaultsOf(address operatorAdmin, address settlementAsset, address corridorAsset)
+    external
+    view
+    returns (address[] memory)
+  {
+    return _vaultsOf[_key(operatorAdmin, settlementAsset, corridorAsset)];
+  }
+
+  /// @inheritdoc IOperatorVaultFactory
+  function vaultCountOf(address operatorAdmin, address settlementAsset, address corridorAsset)
+    external
+    view
+    returns (uint256)
+  {
+    return _vaultsOf[_key(operatorAdmin, settlementAsset, corridorAsset)].length;
   }
 
   /// @inheritdoc IOperatorVaultFactory
@@ -141,13 +174,44 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   ) external {
     if (!isVault[msg.sender]) revert VaultErrors.NotAuthorized();
     if (toAdmin == address(0) || fromAdmin == toAdmin) revert VaultErrors.InvalidParams();
-    bytes32 oldKey = _key(fromAdmin, settlementAsset, corridorAsset);
-    bytes32 newKey = _key(toAdmin, settlementAsset, corridorAsset);
-    if (_vaultOf[oldKey] != msg.sender) revert VaultErrors.NotAuthorized();
-    if (_vaultOf[newKey] != address(0)) revert VaultErrors.DuplicateVault();
-    delete _vaultOf[oldKey];
-    _vaultOf[newKey] = msg.sender;
+    address[] storage from = _vaultsOf[_key(fromAdmin, settlementAsset, corridorAsset)];
+    uint256 index = _indexOf(from, msg.sender);
+
+    // Order-preserving removal rather than swap-and-pop: `vaultOf` answers
+    // with the last entry, and the caller reading it is recovering the deploy
+    // whose receipt it lost, so that has to stay the newest vault instead of
+    // whichever one a swap happened to move into place. The list only holds
+    // vaults this operator paid to deploy, so the shift is bounded by their
+    // own spend.
+    for (uint256 i = index; i + 1 < from.length; ++i) {
+      from[i] = from[i + 1];
+    }
+    from.pop();
+
+    // No duplicate check on the destination: an operator holding several
+    // vaults for one pair is the point, and a handover must not be blocked by
+    // the new admin already running their own book on the same market.
+    _vaultsOf[_key(toAdmin, settlementAsset, corridorAsset)].push(msg.sender);
     emit VaultRekeyed(msg.sender, fromAdmin, toAdmin, settlementAsset, corridorAsset);
+  }
+
+  /// @dev Position of `vault` in `vaults`. Reverts `NotAuthorized` when it is
+  ///      absent, which is a vault asking to be moved off a key it was never
+  ///      indexed under.
+  function _indexOf(address[] storage vaults, address vault) private view returns (uint256) {
+    uint256 length = vaults.length;
+    for (uint256 i = 0; i < length; ++i) {
+      if (vaults[i] == vault) return i;
+    }
+    revert VaultErrors.NotAuthorized();
+  }
+
+  /// @dev Share-token strings are the operator's to choose, within bounds
+  ///      wallets and explorers render sanely. Uniqueness is not enforced:
+  ///      the vault address is the identity, the strings are a label.
+  function _requireLabel(string calldata label, uint256 maxBytes) private pure {
+    uint256 length = bytes(label).length;
+    if (length == 0 || length > maxBytes) revert VaultErrors.InvalidParams();
   }
 
   function _key(address operatorAdmin, address settlementAsset, address corridorAsset)

@@ -239,12 +239,12 @@ describe('VaultPolicy', function () {
       depositEpochDuration: DAY,
       redemptionEpochDuration: DAY,
       redemptionCloseCooldown: DAY,
-      inKindExitTimeout: DAY,
       emergencyExitTimeout: 7 * DAY,
       valuationTimeout: DAY,
       managementFeeWad: 0n,
       riskSignerDelay: DAY,
       minDepositAssets: usdt(1n),
+      minDepositCorridor: 0n,
       minRedeemShares: usdt(1n),
       yieldAdapter: ethers.ZeroAddress,
       minLiquidSettlement: 0n,
@@ -262,17 +262,7 @@ describe('VaultPolicy', function () {
     await expect(
       ctx.harness.validateConfig({ ...cfg, redemptionCloseCooldown: 2n ** 64n })
     ).to.be.reverted
-    await expect(ctx.harness.validateConfig({ ...cfg, inKindExitTimeout: 0n })).to.be.reverted
-    await expect(
-      ctx.harness.validateConfig({ ...cfg, inKindExitTimeout: 2n ** 64n })
-    ).to.be.reverted
     await expect(ctx.harness.validateConfig({ ...cfg, emergencyExitTimeout: 0n })).to.be.reverted
-    await expect(
-      ctx.harness.validateConfig({ ...cfg, emergencyExitTimeout: cfg.inKindExitTimeout })
-    ).to.be.reverted
-    await expect(
-      ctx.harness.validateConfig({ ...cfg, emergencyExitTimeout: BigInt(cfg.inKindExitTimeout) - 1n })
-    ).to.be.reverted
     await expect(
       ctx.harness.validateConfig({ ...cfg, emergencyExitTimeout: 2n ** 64n })
     ).to.be.reverted

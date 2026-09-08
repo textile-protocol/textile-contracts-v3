@@ -1,19 +1,20 @@
 /**
  * Audit regression — H-01 (Resolved)
  *
- * Originally: every redeem exit path (`settleRedeemEpoch`, `settleRedeemInKind`,
- * `settleRedeemEmergencyInKind`) recalled the FULL adapter position with a
- * strict `pool.withdraw(max)` first, so an impaired Aave reserve froze every
- * exit — including the last-resort emergency path — and stranded the position.
+ * Originally: every redeem exit path (`settleRedeemEpoch`, the since-removed
+ * `settleRedeemInKind`, `settleRedeemEmergencyInKind`) recalled the FULL
+ * adapter position with a strict `pool.withdraw(max)` first, so an impaired
+ * Aave reserve froze every exit — including the last-resort emergency path —
+ * and stranded the position.
  *
  * Remediation: the emergency exit recalls best-effort and never lets the
  * external protocol revert it. Whatever Aave cannot pay back is booked as a
  * pro-rata in-kind claim on the aToken, which redeemers collect on their own
  * schedule. That holds for a paused reserve too, where Aave blocks aToken
  * transfers exactly like it blocks withdrawals — settlement never touches the
- * token, so the pause can only delay a claim, never the exit. The cash and
- * attested in-kind paths stay strict by design: the pause + emergency ladder
- * is the degraded-conditions exit.
+ * token, so the pause can only delay a claim, never the exit. The attested
+ * path stays strict by design: the pause + emergency ladder is the
+ * degraded-conditions exit.
  */
 import { time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
@@ -47,15 +48,12 @@ describe('AUDIT H-01 — emergency exit survives an impaired Aave recall', funct
 
     await ctx.aavePool.setWithdrawReverts(true)
 
-    // Cash and attested in-kind stay strict: they need the real underlying.
+    // The attested settle stays strict: it needs the real underlying.
     await time.increase(await ctx.vault.emergencyExitTimeout())
     {
       const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
       const sig = await signAttestation(ctx.harness, ctx.risk, att)
       await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.reverted
-      const att2 = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-      const sig2 = await signAttestation(ctx.harness, ctx.risk, att2)
-      await expect(ctx.vault.settleRedeemInKind(redeemId, att2, sig2)).to.be.reverted
     }
 
     // The last-resort exit no longer waits for Aave: it settles the epoch's
@@ -254,7 +252,7 @@ describe('AUDIT H-01 — emergency exit survives an impaired Aave recall', funct
     // 20% of 1k liquid and 20% of the 9k stranded position.
     await expect(ctx.vault.settleRedeemEmergencyInKind(redeemId))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
-      .withArgs(redeemId, true, usdt(2_000n), usdt(200n), 0n)
+      .withArgs(redeemId, usdt(2_000n), usdt(200n), 0n)
     expect(await ctx.vault.reservedSettlement()).to.equal(usdt(200n))
 
     const before = await ctx.settlement.balanceOf(ctx.lp1.address)

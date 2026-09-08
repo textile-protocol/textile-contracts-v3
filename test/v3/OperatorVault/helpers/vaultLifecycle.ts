@@ -1,7 +1,15 @@
-import { time } from '@nomicfoundation/hardhat-network-helpers'
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers'
+import { time } from '@nomicfoundation/hardhat-network-helpers'
+import { ethers } from 'hardhat'
 
-import { DAY, PRICE_1, usdt, type DeployedVault } from '../fixtures/operatorVault.fixture'
+import type { ERC20Mock } from '../../../../typechain-types'
+import {
+  DAY,
+  PRICE_1,
+  usdt,
+  type DeployedVault,
+} from '../fixtures/operatorVault.fixture'
+
 import { freshAttestation, signAttestation } from './vaultSignatures'
 
 export async function closeAndProcessDeposit(
@@ -23,7 +31,9 @@ export async function seedShares(
   owner: SignerWithAddress,
   amount: bigint = usdt(1_000n)
 ): Promise<{ depositId: bigint; amount: bigint }> {
-  await ctx.vault.connect(owner).requestDeposit(amount, owner.address, owner.address)
+  await ctx.vault
+    .connect(owner)
+    .requestDeposit(amount, owner.address, owner.address)
   const depositId = await closeAndProcessDeposit(ctx)
   await ctx.vault.connect(owner).claim(depositId, owner.address, owner.address)
   return { depositId, amount }
@@ -36,7 +46,10 @@ export async function armEmergencyExit(ctx: DeployedVault): Promise<void> {
   await time.increase(await ctx.vault.emergencyExitTimeout())
 }
 
-export async function closeRedeem(ctx: DeployedVault, epochId?: bigint): Promise<bigint> {
+export async function closeRedeem(
+  ctx: DeployedVault,
+  epochId?: bigint
+): Promise<bigint> {
   const id = epochId ?? (await ctx.vault.currentRedeemEpochId())
   await time.increase(DAY)
   await ctx.vault.closeRedeemEpoch(id)
@@ -53,4 +66,21 @@ export async function closeAndSettleRedeem(
   const sig = await signAttestation(ctx.harness, ctx.risk, att)
   await ctx.vault.settleRedeemEpoch(id, att, sig)
   return id
+}
+
+/** Move tokens straight out of the vault, as a mid-fill Permit2 pull would. */
+export async function pullFromVault(
+  ctx: DeployedVault,
+  token: ERC20Mock,
+  to: string,
+  amount: bigint
+): Promise<void> {
+  const vaultAddr = await ctx.vault.getAddress()
+  await ethers.provider.send('hardhat_impersonateAccount', [vaultAddr])
+  await ethers.provider.send('hardhat_setBalance', [
+    vaultAddr,
+    '0x1000000000000000000',
+  ])
+  const asVault = await ethers.getSigner(vaultAddr)
+  await token.connect(asVault).transfer(to, amount)
 }

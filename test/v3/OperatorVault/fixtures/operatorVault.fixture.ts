@@ -67,12 +67,13 @@ export interface VaultInitOverrides {
   minReserveSettlement?: bigint
   minReserveCorridor?: bigint
   minDepositAssets?: bigint
+  /** Corridor-unit minimum; 0n deploys a vault that refuses corridor deposits. */
+  minDepositCorridor?: bigint
   minRedeemShares?: bigint
   maxOrderLifetime?: bigint
   depositEpochDuration?: number
   redemptionEpochDuration?: number
   redemptionCloseCooldown?: number
-  inKindExitTimeout?: number
   emergencyExitTimeout?: number
   valuationTimeout?: number
   riskSignerDelay?: number
@@ -105,6 +106,8 @@ export interface DeployedVault extends VaultSigners {
 
 export function defaultInit(s: VaultSigners, extras: VaultInitOverrides = {}) {
   return {
+    name: 'cNGN/USDT Textile Vault',
+    symbol: 'tv-cNGN-USDT',
     settlementAsset: ethers.ZeroAddress,
     corridorAsset: ethers.ZeroAddress,
     operatorAdmin: s.operatorAdmin.address,
@@ -121,12 +124,12 @@ export function defaultInit(s: VaultSigners, extras: VaultInitOverrides = {}) {
     depositEpochDuration: extras.depositEpochDuration ?? DAY,
     redemptionEpochDuration: extras.redemptionEpochDuration ?? DAY,
     redemptionCloseCooldown: extras.redemptionCloseCooldown ?? DAY,
-    inKindExitTimeout: extras.inKindExitTimeout ?? 3 * DAY,
     emergencyExitTimeout: extras.emergencyExitTimeout ?? 7 * DAY,
     valuationTimeout: extras.valuationTimeout ?? DAY,
     managementFeeWad: extras.managementFeeWad ?? 0n,
     riskSignerDelay: extras.riskSignerDelay ?? DAY,
     minDepositAssets: extras.minDepositAssets ?? usdt(100n),
+    minDepositCorridor: extras.minDepositCorridor ?? cngn(100n),
     minRedeemShares: extras.minRedeemShares ?? usdt(100n),
     enableYield: extras.enableYield ?? false,
     minLiquidSettlement: extras.minLiquidSettlement ?? 0n,

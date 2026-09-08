@@ -102,21 +102,15 @@ describe('OperatorVault — recovery', function () {
       await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
       const epochId = await closeRedeem(ctx)
       await ctx.vault.connect(ctx.guardian).pause()
-      const inKind = await ctx.vault.inKindExitTimeout()
       const emergency = await ctx.vault.emergencyExitTimeout()
       await expect(ctx.vault.settleRedeemEmergencyInKind(epochId)).to.be.revertedWithCustomError(
         ctx.vault,
         'TimeoutNotReached'
       )
-      await time.increase(inKind)
-      await expect(ctx.vault.settleRedeemEmergencyInKind(epochId)).to.be.revertedWithCustomError(
-        ctx.vault,
-        'TimeoutNotReached'
-      )
-      await time.increase(emergency - inKind)
+      await time.increase(emergency)
       await expect(ctx.vault.connect(ctx.lp2).settleRedeemEmergencyInKind(epochId))
         .to.emit(ctx.vault, 'RedeemEpochSettled')
-        .withArgs(epochId, true, usdt(1_000n), usdt(1_000n), surplus)
+        .withArgs(epochId, usdt(1_000n), usdt(1_000n), surplus)
       expect(await ctx.vault.closeOnly()).to.equal(false)
       expect(await ctx.vault.isValidSignature(ethers.ZeroHash, '0x')).to.equal(ERC1271_FAIL)
 
@@ -138,14 +132,13 @@ describe('OperatorVault — recovery', function () {
       await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(800n), ctx.lp1.address, ctx.lp1.address)
       const epochId = await closeRedeem(ctx)
       await ctx.vault.connect(ctx.guardian).pause()
-      await time.increase(await ctx.vault.inKindExitTimeout())
 
       const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
       att.freeSettlement = 0n
       att.freeCorridor = 0n
       att.nav = 0n
       const sig = await signAttestation(ctx.harness, ctx.risk, att)
-      await ctx.vault.settleRedeemInKind(epochId, att, sig)
+      await ctx.vault.settleRedeemEpoch(epochId, att, sig)
 
       const before = await ctx.settlement.balanceOf(ctx.lp1.address)
       await ctx.vault.connect(ctx.lp1).claim(epochId, ctx.lp1.address, ctx.lp1.address)

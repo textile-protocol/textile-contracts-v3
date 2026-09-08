@@ -37,17 +37,17 @@ describe('OperatorVault — remaining edges', function () {
     expect((await ctx.vault.epochs(epochId)).state).to.equal(3) // Processed
   })
 
-  it('lets a spender redeem with allowance and surfaces pending/claimable views', async function () {
+  it('lets a spender redeem with allowance and tracks the request through settlement', async function () {
     const ctx = await deployOperatorVault()
     const { depositId } = await seedShares(ctx, ctx.lp1)
 
     await ctx.vault.connect(ctx.lp1).approve(ctx.lp2.address, usdt(200n))
     await ctx.vault.connect(ctx.lp2).requestRedeem(usdt(200n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
-    expect(await ctx.vault.pendingRedeemRequest(redeemId, ctx.lp1.address)).to.equal(usdt(200n))
-    expect(await ctx.vault.claimableRedeemRequest(redeemId, ctx.lp1.address)).to.equal(0)
-    expect(await ctx.vault.pendingDepositRequest(redeemId, ctx.lp1.address)).to.equal(0)
-    expect(await ctx.vault.claimableDepositRequest(depositId, ctx.lp1.address)).to.equal(0)
+    expect(await ctx.vault.requestUnits(ctx.lp1.address, redeemId)).to.equal(usdt(200n))
+    expect((await ctx.vault.epochs(redeemId)).state).to.equal(1) // Open: pending, not claimable
+    expect(await ctx.vault.requestUnits(ctx.lp1.address, depositId)).to.equal(0) // claimed
+    expect(await ctx.vault.requestClaimed(ctx.lp1.address, depositId)).to.equal(true)
 
     await expect(
       ctx.vault.connect(ctx.lp1).claim(redeemId, ctx.lp1.address, ctx.lp1.address)
@@ -58,8 +58,8 @@ describe('OperatorVault — remaining edges', function () {
     const ratt = await freshAttestation(ctx.vault, redeemId, PRICE_1)
     const rsig = await signAttestation(ctx.harness, ctx.risk, ratt)
     await ctx.vault.settleRedeemEpoch(redeemId, ratt, rsig)
-    expect(await ctx.vault.claimableRedeemRequest(redeemId, ctx.lp1.address)).to.equal(usdt(200n))
-    expect(await ctx.vault.pendingRedeemRequest(redeemId, ctx.lp1.address)).to.equal(0)
+    expect(await ctx.vault.requestUnits(ctx.lp1.address, redeemId)).to.equal(usdt(200n))
+    expect((await ctx.vault.epochs(redeemId)).state).to.equal(5) // Settled: claimable
   })
 
   it('rejects a spender redeem without allowance', async function () {
@@ -136,16 +136,13 @@ describe('OperatorVault — remaining edges', function () {
       ctx.vault,
       'EpochNotClosed'
     )
-    await expect(ctx.vault.settleRedeemInKind(redeemId, att, sig)).to.be.revertedWithCustomError(
-      ctx.vault,
-      'EpochNotClosed'
-    )
   })
 
-  it('reverts a full-supply cash exit that still holds corridor', async function () {
+  it('requires the pause for a full-supply exit that still holds corridor, then pays it out', async function () {
     const ctx = await deployOperatorVault()
     await seedShares(ctx, ctx.lp1, usdt(1_000n))
-    await ctx.corridor.mint(await ctx.vault.getAddress(), 10n ** 18n)
+    const corridorHeld = 10n ** 18n
+    await ctx.corridor.mint(await ctx.vault.getAddress(), corridorHeld)
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
     await time.increase(DAY)
@@ -154,24 +151,42 @@ describe('OperatorVault — remaining edges', function () {
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
     await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.revertedWithCustomError(
       ctx.vault,
-      'SurplusRequiresInKind'
+      'PauseRequired'
     )
+    await ctx.vault.connect(ctx.guardian).pause()
+    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig))
+      .to.emit(ctx.vault, 'RedeemEpochSettled')
+      .withArgs(redeemId, usdt(1_000n), usdt(1_000n), corridorHeld)
+    const before = await ctx.corridor.balanceOf(ctx.lp1.address)
+    await ctx.vault.connect(ctx.lp1).claim(redeemId, ctx.lp1.address, ctx.lp1.address)
+    expect((await ctx.corridor.balanceOf(ctx.lp1.address)) - before).to.equal(corridorHeld)
+    expect(await ctx.vault.freeCorridor()).to.equal(0n)
   })
 
-  it('reverts cash settlement when free settlement cannot cover NAV', async function () {
+  it('pays pro rata when free settlement alone could not cover the epoch NAV', async function () {
     const ctx = await deployOperatorVault()
     await seedShares(ctx, ctx.lp1, usdt(1_000n))
-    await ctx.corridor.mint(await ctx.vault.getAddress(), 10n ** 21n)
+    // 1,000 cNGN at PRICE_1 doubles NAV: 600 shares are worth 1,200 in
+    // settlement, more than the 1,000 held. Pro rata sidesteps the shortfall
+    // by paying 60% of each leg instead of converting one into the other.
+    const corridorHeld = 10n ** 21n
+    await ctx.corridor.mint(await ctx.vault.getAddress(), corridorHeld)
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(600n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
     await time.increase(DAY)
     await ctx.vault.closeRedeemEpoch(redeemId)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.revertedWithCustomError(
-      ctx.vault,
-      'InsufficientSettlement'
-    )
+    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig))
+      .to.emit(ctx.vault, 'RedeemEpochSettled')
+      .withArgs(redeemId, usdt(600n), usdt(600n), (corridorHeld * 6n) / 10n)
+    const beforeS = await ctx.settlement.balanceOf(ctx.lp1.address)
+    const beforeC = await ctx.corridor.balanceOf(ctx.lp1.address)
+    await ctx.vault.connect(ctx.lp1).claim(redeemId, ctx.lp1.address, ctx.lp1.address)
+    expect((await ctx.settlement.balanceOf(ctx.lp1.address)) - beforeS).to.equal(usdt(600n))
+    expect((await ctx.corridor.balanceOf(ctx.lp1.address)) - beforeC).to.equal((corridorHeld * 6n) / 10n)
+    expect(await ctx.vault.freeSettlement()).to.equal(usdt(400n))
+    expect(await ctx.vault.freeCorridor()).to.equal((corridorHeld * 4n) / 10n)
   })
 
   it('reverts a deposit that would mint zero shares against a huge NAV', async function () {
@@ -228,12 +243,14 @@ describe('OperatorVault — remaining edges', function () {
     expect(await ctx.vault.balanceOf(ctx.lp1.address)).to.equal(usdt(100n))
   })
 
-  it('returns zero for pending and claimable views on the wrong epoch type', async function () {
+  it('keeps an open deposit request out of claim until its epoch is processed', async function () {
     const ctx = await deployOperatorVault()
     await ctx.vault.connect(ctx.lp1).requestDeposit(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     const depositId = await ctx.vault.currentDepositEpochId()
-    expect(await ctx.vault.pendingRedeemRequest(depositId, ctx.lp1.address)).to.equal(0)
-    expect(await ctx.vault.claimableRedeemRequest(depositId, ctx.lp1.address)).to.equal(0)
-    expect(await ctx.vault.claimableDepositRequest(depositId, ctx.lp1.address)).to.equal(0)
+    expect(await ctx.vault.requestUnits(ctx.lp1.address, depositId)).to.equal(usdt(100n))
+    expect(await ctx.vault.requestClaimed(ctx.lp1.address, depositId)).to.equal(false)
+    await expect(
+      ctx.vault.connect(ctx.lp1).claim(depositId, ctx.lp1.address, ctx.lp1.address)
+    ).to.be.revertedWithCustomError(ctx.vault, 'EpochNotClaimable')
   })
 })

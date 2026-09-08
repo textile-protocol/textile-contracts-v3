@@ -6,7 +6,7 @@ import { seedShares } from './helpers/vaultLifecycle'
 import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
 
 describe('OperatorVault — management fee', function () {
-  it('checkpoints the fee before an in-kind burn while paused', async function () {
+  it('checkpoints the fee before a paused full-supply settle', async function () {
     const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n })
     await seedShares(ctx, ctx.lp1)
 
@@ -18,7 +18,7 @@ describe('OperatorVault — management fee', function () {
     await time.increase(365 * DAY)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await ctx.vault.settleRedeemInKind(redeemId, att, sig)
+    await ctx.vault.settleRedeemEpoch(redeemId, att, sig)
 
     expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.be.gt(0)
   })

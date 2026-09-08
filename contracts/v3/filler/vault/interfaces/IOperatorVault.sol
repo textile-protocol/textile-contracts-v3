@@ -9,7 +9,7 @@ import { VaultLib } from "../libraries/VaultLib.sol";
 /**
  * @title IOperatorVault
  * @notice External surface for the RFQ operator vault. Request/claim is
- *         custom: a closed redeem can pay settlement and corridor, so
+ *         custom: a settled redeem pays settlement and corridor, so
  *         ERC-7540 `deposit`/`mint`/`withdraw`/`redeem` are not implemented.
  *         Preview methods revert — there is no honest preview until an
  *         attestation exists.
@@ -50,6 +50,15 @@ interface IOperatorVault {
     external
     returns (uint256 requestId);
 
+  /// @notice Queue a corridor-asset deposit. Corridor deposits run in their
+  ///         own epochs, sit outside `freeCorridor` until processed, and are
+  ///         then priced at the attested corridor price before minting
+  ///         against the attested NAV like a settlement deposit. Reverts
+  ///         `CorridorDepositsDisabled` when `minDepositCorridor` is zero.
+  function requestDepositCorridor(uint256 assets, address controller, address owner)
+    external
+    returns (uint256 requestId);
+
   function cancelDeposit(uint256 requestId, address controller) external;
 
   function requestRedeem(uint256 shares, address controller, address owner)
@@ -69,21 +78,20 @@ interface IOperatorVault {
 
   function closeRedeemEpoch(uint256 epochId) external;
 
+  /// @notice Settle a closed redeem epoch against a risk-signer attestation.
+  ///         Redeemers are paid both assets pro rata to their share of
+  ///         supply, off the attested free balances, so the payout never
+  ///         depends on the corridor price. A full-supply exit requires the
+  ///         vault to be paused and pays live balances instead.
   function settleRedeemEpoch(uint256 epochId, VaultLib.NavAttestation calldata attestation, bytes calldata signature)
     external;
-
-  function settleRedeemInKind(
-    uint256 epochId,
-    VaultLib.NavAttestation calldata attestation,
-    bytes calldata signature
-  ) external;
 
   /// @notice Last-resort in-kind redeem when the risk signer cannot attest.
   ///         Vault must already be paused. `emergencyExitTimeout` must have
   ///         elapsed since the epoch closed. Pays live free balances,
-  ///         including unattested surplus. Anyone may call. Attested in-kind
-  ///         while paused also pays live, so a hostile risk key cannot
-  ///         pre-settle a partial epoch at zero and block this path.
+  ///         including unattested surplus. Anyone may call. Attested
+  ///         settlement while paused also pays live, so a hostile risk key
+  ///         cannot pre-settle a partial epoch at zero and block this path.
   ///         The adapter recall is best-effort and this path never calls the
   ///         external protocol: a position Aave cannot pay back becomes a
   ///         pro-rata in-kind claim on the yield token, collected at claim
@@ -159,6 +167,7 @@ interface IOperatorVault {
   ///         the only balance Permit2 can pull from. ERC-1271 caps settlement
   ///         input here; `prepareSettlement` first to count held funds.
   function liquidSettlement() external view returns (uint256);
+  /// @notice Corridor net of pending deposits and reserved payouts.
   function freeCorridor() external view returns (uint256);
   function quotableSettlement() external view returns (uint256);
   function quotableCorridor() external view returns (uint256);

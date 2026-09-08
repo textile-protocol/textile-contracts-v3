@@ -85,15 +85,13 @@ library VaultPolicy {
     if (
       cfg.maxOrderInputSettlement == 0 || cfg.maxOrderInputCorridor == 0 || cfg.maxOrderLifetime == 0
         || cfg.depositEpochDuration == 0 || cfg.redemptionEpochDuration == 0 || cfg.redemptionCloseCooldown == 0
-        || cfg.inKindExitTimeout == 0 || cfg.emergencyExitTimeout == 0 || cfg.valuationTimeout == 0
+        || cfg.emergencyExitTimeout == 0 || cfg.valuationTimeout == 0
         || cfg.riskSignerDelay == 0 || cfg.minDepositAssets == 0 || cfg.minRedeemShares == 0 || cfg.version == 0
     ) revert VaultErrors.InvalidParams();
-    if (cfg.emergencyExitTimeout <= cfg.inKindExitTimeout) revert VaultErrors.InvalidParams();
     if (cfg.yieldAdapter == address(0) && cfg.minLiquidSettlement != 0) revert VaultErrors.InvalidParams();
     _requireSafeDuration(cfg.depositEpochDuration);
     _requireSafeDuration(cfg.redemptionEpochDuration);
     _requireSafeDuration(cfg.redemptionCloseCooldown);
-    _requireSafeDuration(cfg.inKindExitTimeout);
     _requireSafeDuration(cfg.emergencyExitTimeout);
     _requireSafeDuration(cfg.valuationTimeout);
     _requireSafeDuration(cfg.riskSignerDelay);

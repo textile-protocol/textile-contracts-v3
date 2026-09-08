@@ -3,7 +3,7 @@ import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
-import { closeAndProcessDeposit } from './helpers/vaultLifecycle'
+import { closeAndProcessDeposit, pullFromVault } from './helpers/vaultLifecycle'
 import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
 
 describe('OperatorVault — deposits', function () {
@@ -21,7 +21,7 @@ describe('OperatorVault — deposits', function () {
     const before = await settlement.balanceOf(lp1.address)
     await vault.connect(lp1).requestDeposit(amount, lp1.address, lp1.address)
     expect(await vault.pendingSettlement()).to.equal(amount)
-    expect(await vault.pendingDepositRequest(1n, lp1.address)).to.equal(amount)
+    expect(await vault.requestUnits(lp1.address, 1n)).to.equal(amount)
 
     await vault.connect(lp1).cancelDeposit(1n, lp1.address)
     expect(await vault.pendingSettlement()).to.equal(0)
@@ -30,7 +30,8 @@ describe('OperatorVault — deposits', function () {
 
   it('mints claimable shares at one price for the epoch', async function () {
     const { vault, lp1, amount, epochId } = await processOpenDeposit()
-    expect(await vault.claimableDepositRequest(epochId, lp1.address)).to.equal(amount)
+    expect(await vault.requestUnits(lp1.address, epochId)).to.equal(amount)
+    expect((await vault.epochs(epochId)).state).to.equal(3) // Processed
     await vault.connect(lp1).claim(epochId, lp1.address, lp1.address)
     expect(await vault.balanceOf(lp1.address)).to.equal(amount)
     expect(await vault.totalSupply()).to.equal(amount)
@@ -204,10 +205,7 @@ describe('OperatorVault — deposits', function () {
     const att = await freshAttestation(ctx.vault, second, PRICE_1)
     const vaultAddr = await ctx.vault.getAddress()
     await ctx.settlement.mint(vaultAddr, usdt(500n))
-    await ethers.provider.send('hardhat_impersonateAccount', [vaultAddr])
-    await ethers.provider.send('hardhat_setBalance', [vaultAddr, '0x1000000000000000000'])
-    const asVault = await ethers.getSigner(vaultAddr)
-    await ctx.settlement.connect(asVault).transfer(ctx.lp2.address, usdt(200n))
+    await pullFromVault(ctx, ctx.settlement, ctx.lp2.address, usdt(200n))
     await ctx.vault.processDepositEpoch(second, att, await signAttestation(ctx.harness, ctx.risk, att))
     const epoch = await ctx.vault.epochs(second)
     expect(epoch.shares).to.equal(usdt(1_000n))
@@ -223,11 +221,7 @@ describe('OperatorVault — deposits', function () {
     await time.increase(DAY)
     await ctx.vault.closeDepositEpoch(second)
     const att = await freshAttestation(ctx.vault, second, PRICE_1)
-    const vaultAddr = await ctx.vault.getAddress()
-    await ethers.provider.send('hardhat_impersonateAccount', [vaultAddr])
-    await ethers.provider.send('hardhat_setBalance', [vaultAddr, '0x1000000000000000000'])
-    const asVault = await ethers.getSigner(vaultAddr)
-    await ctx.settlement.connect(asVault).transfer(ctx.lp2.address, usdt(100n))
+    await pullFromVault(ctx, ctx.settlement, ctx.lp2.address, usdt(100n))
     await expect(
       ctx.vault.processDepositEpoch(second, att, await signAttestation(ctx.harness, ctx.risk, att))
     ).to.be.revertedWithCustomError(ctx.vault, 'InconsistentNav')
@@ -238,7 +232,7 @@ describe('OperatorVault — deposits', function () {
     const amount = usdt(1_000n)
     await expect(vault.connect(lp1).requestDeposit(amount, lp1.address, lp1.address))
       .to.emit(vault, 'DepositRequest')
-      .withArgs(lp1.address, lp1.address, 1n, lp1.address, amount)
+      .withArgs(lp1.address, lp1.address, 1n, lp1.address, amount, false)
   })
 
   it('rejects processing while paused and allows void+refund while paused', async function () {

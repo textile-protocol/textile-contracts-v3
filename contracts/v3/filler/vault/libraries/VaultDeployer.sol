@@ -10,7 +10,10 @@ import { VaultTypes } from "./VaultTypes.sol";
 ///         from the factory: the vault is created from the factory address and
 ///         sees the factory as `msg.sender`, exactly as a direct `new` would.
 library VaultDeployer {
-  function deploy(VaultTypes.VaultConfig memory cfg) external returns (address) {
-    return address(new OperatorVault(cfg));
+  function deploy(VaultTypes.VaultConfig calldata cfg, string calldata name, string calldata symbol)
+    external
+    returns (address)
+  {
+    return address(new OperatorVault(cfg, name, symbol));
   }
 }

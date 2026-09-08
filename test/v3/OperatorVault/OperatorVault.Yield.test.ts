@@ -291,18 +291,18 @@ describe('OperatorVault — idle yield', function () {
       expect(await ctx.vault.reservedSettlement()).to.equal(0n)
     })
 
-    it('recalls before an attested in-kind settle', async function () {
+    it('recalls before a paused partial settle too', async function () {
       const ctx = await deployOperatorVault({ enableYield: true })
       await seedShares(ctx, ctx.lp1, usdt(1_000n))
       await ctx.vault.connect(ctx.lp1).transfer(ctx.lp2.address, usdt(200n))
       await ctx.vault.allocateIdle()
       await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(800n), ctx.lp1.address, ctx.lp1.address)
       const redeemId = await closeRedeem(ctx)
-      await time.increase(await ctx.vault.inKindExitTimeout())
+      await ctx.vault.connect(ctx.guardian).pause()
 
       const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
       const sig = await signAttestation(ctx.harness, ctx.risk, att)
-      await expect(ctx.vault.settleRedeemInKind(redeemId, att, sig)).to.emit(ctx.vault, 'IdleRecalled')
+      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.emit(ctx.vault, 'IdleRecalled')
       expect(await ctx.adapter.held()).to.equal(0n)
     })
 
