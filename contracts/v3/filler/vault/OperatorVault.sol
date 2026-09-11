@@ -306,7 +306,13 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     // Corridor is valued at the signed price first, then converts like settlement.
     uint256 value =
       inCorridor ? VaultLib.nav(0, assets, price, settlementDecimals, corridorDecimals) : assets;
-    uint256 shares = VaultLib.convertToShares(value, supply, conversionNav, Math.Rounding.Floor);
+    // Convert against the NAV the shares actually own. With no supply that is
+    // nothing: the epoch mints at its own value and any surplus already here
+    // (a donation, leftover dust) is NAV its depositors share pro rata. Using
+    // the signed NAV instead let a bare transfer between close and process
+    // shrink the epoch to one share and zero every claim (audit H-02).
+    uint256 shares =
+      VaultLib.convertToShares(value, supply, supply == 0 ? 0 : conversionNav, Math.Rounding.Floor);
     if (shares == 0) revert VaultErrors.ZeroAmount();
 
     _releasePending(inCorridor, assets);
@@ -965,7 +971,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ///         is allowed so it cannot grief settlement, but conversion uses
   ///         the signed NAV — live `balanceOf` can drop in
   ///         `executeWithCallback` while still sitting above the floors.
-  ///         Surplus is marked in afterwards via `_recordSettledNav`.
+  ///         Surplus is marked in afterwards via `_recordSettledNav`. A
+  ///         bootstrap deposit epoch ignores the signed NAV altogether: see
+  ///         `processDepositEpoch`.
   function _requireLiveNav(VaultLib.NavAttestation calldata att, uint256 priceWad)
     private
     view

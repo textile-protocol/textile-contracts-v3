@@ -12,17 +12,36 @@ import {
 
 import { freshAttestation, signAttestation } from './vaultSignatures'
 
+export async function closeDeposit(
+  ctx: DeployedVault,
+  epochId?: bigint
+): Promise<bigint> {
+  const id = epochId ?? (await ctx.vault.currentDepositEpochId())
+  await time.increase(DAY)
+  await ctx.vault.closeDepositEpoch(id)
+  return id
+}
+
+/** Process a closed deposit epoch with a fresh attestation of the live
+ *  balances. Returns the NAV the signer attested. */
+export async function processDeposit(
+  ctx: DeployedVault,
+  epochId: bigint,
+  price: bigint = PRICE_1
+): Promise<bigint> {
+  const att = await freshAttestation(ctx.vault, epochId, price)
+  const sig = await signAttestation(ctx.harness, ctx.risk, att)
+  await ctx.vault.processDepositEpoch(epochId, att, sig)
+  return att.nav
+}
+
 export async function closeAndProcessDeposit(
   ctx: DeployedVault,
   epochId?: bigint,
   price: bigint = PRICE_1
 ): Promise<bigint> {
-  const id = epochId ?? (await ctx.vault.currentDepositEpochId())
-  await time.increase(DAY)
-  await ctx.vault.closeDepositEpoch(id)
-  const att = await freshAttestation(ctx.vault, id, price)
-  const sig = await signAttestation(ctx.harness, ctx.risk, att)
-  await ctx.vault.processDepositEpoch(id, att, sig)
+  const id = await closeDeposit(ctx, epochId)
+  await processDeposit(ctx, id, price)
   return id
 }
 
