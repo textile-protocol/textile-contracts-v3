@@ -149,3 +149,38 @@ export async function signVaultEnvelope(
   )
   return { hash, signature: envelope, params }
 }
+
+/**
+ * A policy-valid settlement→corridor order for `ctx`, ready for
+ * `signVaultEnvelope`. Tests override the field they are exercising.
+ */
+export async function defaultOrder(
+  ctx: {
+    reactor: string
+    permit2: string
+    preferredFiller: string
+    vault: { target: string | object }
+    settlement: { target: string | object }
+    corridor: { target: string | object }
+    other: { address: string }
+  },
+  overrides: Partial<VaultOrderInput> = {}
+): Promise<VaultOrderInput> {
+  const chainId = Number((await ethers.provider.getNetwork()).chainId)
+  const now = (await ethers.provider.getBlock('latest'))!.timestamp
+  return {
+    reactor: ctx.reactor,
+    vault: ctx.vault.target as string,
+    permit2: ctx.permit2,
+    chainId,
+    nonce: 1n << 128n,
+    deadline: BigInt(now + 600),
+    inputToken: ctx.settlement.target as string,
+    inputAmount: 100n * 10n ** 6n,
+    outputToken: ctx.corridor.target as string,
+    outputAmount: 100n * 10n ** 18n,
+    preferredFiller: ctx.preferredFiller,
+    taker: ctx.other.address,
+    ...overrides,
+  }
+}

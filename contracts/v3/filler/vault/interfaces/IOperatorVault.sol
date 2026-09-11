@@ -38,6 +38,9 @@ interface IOperatorVault {
   event RiskAdminTransferred(address indexed previous, address indexed current);
   event GuardianUpdated(address indexed previous, address indexed current);
   event FeeRecipientUpdated(address indexed previous, address indexed current);
+  /// @notice `previous` is what the constructor (or the last update) set, so
+  ///         the earliest event on a vault names the deploy-time floor.
+  event MinLiquidSettlementUpdated(uint256 previous, uint256 current);
   event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
   event NavSettled(uint256 nav, uint256 timestamp);
   event OperatorSet(address indexed account, address indexed operator, bool approved);

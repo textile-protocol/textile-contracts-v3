@@ -16,7 +16,12 @@ import {
   type DeployedVault,
 } from './fixtures/operatorVault.fixture'
 import { closeRedeem, seedShares } from './helpers/vaultLifecycle'
-import { freshAttestation, signAttestation, signVaultEnvelope } from './helpers/vaultSignatures'
+import {
+  defaultOrder,
+  freshAttestation,
+  signAttestation,
+  signVaultEnvelope,
+} from './helpers/vaultSignatures'
 
 async function liquidOf(ctx: DeployedVault): Promise<bigint> {
   const [balance, pending, reserved] = await Promise.all([
@@ -142,6 +147,85 @@ describe('OperatorVault — idle yield', function () {
       expect(await ctx.vault.closeOnly()).to.equal(true)
       await ctx.vault.allocateIdle()
       expect(await ctx.adapter.held()).to.equal(0n)
+    })
+  })
+
+  describe('setMinLiquidSettlement', function () {
+    it("is the operator admin's call and nobody else's", async function () {
+      const ctx = await deployOperatorVault({ enableYield: true, minLiquidSettlement: usdt(1_000n) })
+      for (const outsider of [ctx.other, ctx.riskAdmin, ctx.guardian, ctx.strategy]) {
+        await expect(
+          ctx.vault.connect(outsider).setMinLiquidSettlement(usdt(500n))
+        ).to.be.revertedWithCustomError(ctx.vault, 'NotAuthorized')
+      }
+      await expect(ctx.vault.connect(ctx.operatorAdmin).setMinLiquidSettlement(usdt(500n)))
+        .to.emit(ctx.vault, 'MinLiquidSettlementUpdated')
+        .withArgs(usdt(1_000n), usdt(500n))
+      expect(await ctx.vault.minLiquidSettlement()).to.equal(usdt(500n))
+    })
+
+    it('refuses a floor on a vault without yield, and a no-op write', async function () {
+      const noYield = await deployOperatorVault()
+      await expect(
+        noYield.vault.connect(noYield.operatorAdmin).setMinLiquidSettlement(usdt(1n))
+      ).to.be.revertedWithCustomError(noYield.vault, 'InvalidParams')
+
+      const ctx = await deployOperatorVault({ enableYield: true, minLiquidSettlement: usdt(1_000n) })
+      await expect(
+        ctx.vault.connect(ctx.operatorAdmin).setMinLiquidSettlement(usdt(1_000n))
+      ).to.be.revertedWithCustomError(ctx.vault, 'InvalidParams')
+    })
+
+    it('moves the allocateIdle floor in both directions without recalling on its own', async function () {
+      const ctx = await deployOperatorVault({ enableYield: true, minLiquidSettlement: usdt(1_000n) })
+      await seedShares(ctx, ctx.lp1, usdt(10_000n))
+
+      // Lower: the next allocation supplies down to the new floor.
+      await ctx.vault.connect(ctx.operatorAdmin).setMinLiquidSettlement(usdt(500n))
+      await expect(ctx.vault.allocateIdle()).to.emit(ctx.vault, 'IdleAllocated').withArgs(usdt(9_500n))
+      expect(await liquidOf(ctx)).to.equal(usdt(500n))
+
+      // Raise: nothing comes back by itself, allocation just stops.
+      await ctx.vault.connect(ctx.operatorAdmin).setMinLiquidSettlement(usdt(3_000n))
+      await expect(ctx.vault.allocateIdle()).to.not.emit(ctx.vault, 'IdleAllocated')
+      expect(await liquidOf(ctx)).to.equal(usdt(500n))
+
+      // A fill's prepare recalls exactly what it needs, floor or no floor.
+      await ctx.vault.prepareSettlement(usdt(2_000n))
+      expect(await liquidOf(ctx)).to.equal(usdt(2_000n))
+
+      // The permissionless recall + allocate pair settles at the new floor.
+      await ctx.vault.connect(ctx.other).recallAll()
+      await ctx.vault.connect(ctx.other).allocateIdle()
+      expect(await liquidOf(ctx)).to.equal(usdt(3_000n))
+      expect(await ctx.adapter.held()).to.equal(usdt(7_000n))
+
+      // Zero is allowed, but the pause brake still beats it: the setter
+      // works while paused and allocation stays halted.
+      await ctx.vault.connect(ctx.guardian).pause()
+      await ctx.vault.connect(ctx.operatorAdmin).setMinLiquidSettlement(0n)
+      await ctx.vault.allocateIdle()
+      expect(await ctx.adapter.held()).to.equal(usdt(7_000n))
+      await ctx.vault.connect(ctx.guardian).unpause()
+      await ctx.vault.allocateIdle()
+      expect(await liquidOf(ctx)).to.equal(0n)
+      expect(await ctx.adapter.held()).to.equal(usdt(10_000n))
+    })
+
+    it('leaves order validation and the trading epoch alone', async function () {
+      const ctx = await deployOperatorVault({ enableYield: true, minLiquidSettlement: usdt(1_000n) })
+      await seedShares(ctx, ctx.lp1, usdt(10_000n))
+      const epochBefore = await ctx.vault.tradingEpoch()
+      const { hash, signature } = await signVaultEnvelope(
+        ctx.strategy,
+        ctx.risk,
+        await defaultOrder(ctx, { nonce: (epochBefore << 128n) | 1n, inputAmount: usdt(1_000n) })
+      )
+      expect(await ctx.vault.isValidSignature(hash, signature)).to.equal(ERC1271_MAGIC)
+
+      await ctx.vault.connect(ctx.operatorAdmin).setMinLiquidSettlement(usdt(2_000n))
+      expect(await ctx.vault.tradingEpoch()).to.equal(epochBefore)
+      expect(await ctx.vault.isValidSignature(hash, signature)).to.equal(ERC1271_MAGIC)
     })
   })
 

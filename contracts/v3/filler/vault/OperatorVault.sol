@@ -85,7 +85,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   /// @notice Optional idle-yield adapter for the settlement asset. Zero = off.
   IYieldAdapter public immutable yieldAdapter;
   /// @notice Liquid settlement floor `allocateIdle` never supplies below.
-  uint256 public immutable minLiquidSettlement;
+  ///         Storage, not immutable: the operator admin retunes it with
+  ///         `setMinLiquidSettlement` as the book's fill sizes change. It
+  ///         only shapes what idle goes to the adapter — never what an order
+  ///         may pull or what a redeemer is paid.
+  uint256 public minLiquidSettlement;
   /// @notice Token the adapter position is held in (e.g. the aToken). Zero
   ///         when yield is off. Paid out in kind by the emergency exit when
   ///         the underlying cannot be recalled. Not public: the auto-getter
@@ -643,6 +647,27 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   function setGuardian(address next) external onlyOperatorAdmin {
     VaultPolicy.setGuardian(_roles, next);
+  }
+
+  /// @notice Retune the liquid floor. Same rule as `validateConfig`: a vault
+  ///         without an adapter has no floor to tune. A no-op write is
+  ///         refused so every event marks a change and the verification
+  ///         rewind can trust `previous`.
+  /// @dev Bounded blast radius by design: zero sends every idle unit to the
+  ///      adapter (more Aave exposure, nothing leaves the vault), a huge
+  ///      value switches yield off. Pause halts allocation and `recallAll` is
+  ///      open to anyone, so either direction can be undone without this
+  ///      role. No trading-epoch bump: the floor is not part of order
+  ///      validation, so in-flight orders stay valid. Raising it does not
+  ///      recall: `prepareSettlement` only covers the fill in front of it,
+  ///      so liquid reaches the new floor through `recallAll` (after which
+  ///      `allocateIdle` re-supplies only what sits above it) or through
+  ///      fresh settlement inflows.
+  function setMinLiquidSettlement(uint256 next) external onlyOperatorAdmin {
+    uint256 previous = minLiquidSettlement;
+    if (address(yieldAdapter) == address(0) || next == previous) revert VaultErrors.InvalidParams();
+    minLiquidSettlement = next;
+    emit MinLiquidSettlementUpdated(previous, next);
   }
 
   function setFeeRecipient(address next) external onlyOperatorAdmin nonReentrant {
