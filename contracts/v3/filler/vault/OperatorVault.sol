@@ -349,13 +349,17 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   /// @inheritdoc IOperatorVault
   /// @dev Deliberately no pause check, unlike `requestDeposit`: exits must
   ///      always be able to queue; only new capital is blocked while paused.
+  ///      The fee recipient is exempt from `minRedeemShares`: its position is
+  ///      pure dilution residue, and there is no other way out of the vault.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     override
     nonReentrant
     returns (uint256 requestId)
   {
-    if (shares < minRedeemShares) revert VaultErrors.BelowMinSize();
+    if (shares == 0 || (shares < minRedeemShares && owner != _roles.feeRecipient)) {
+      revert VaultErrors.BelowMinSize();
+    }
     if (controller == address(0) || owner == address(0)) revert VaultErrors.ZeroAddress();
 
     requestId = _openOrCurrentRedeemEpoch();

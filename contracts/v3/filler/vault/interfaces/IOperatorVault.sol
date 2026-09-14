@@ -64,6 +64,8 @@ interface IOperatorVault {
 
   function cancelDeposit(uint256 requestId, address controller) external;
 
+  /// @notice Queue a redemption. Minimum `minRedeemShares`, except for the
+  ///         fee recipient — the floor would strand its dilution residue.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     returns (uint256 requestId);
