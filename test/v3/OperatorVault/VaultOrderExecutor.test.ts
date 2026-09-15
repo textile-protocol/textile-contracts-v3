@@ -2,69 +2,11 @@ import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
 import { encodeLimitOrder } from '../helpers/limitOrderPermit2'
-import {
-  CANONICAL_PERMIT2,
-  deployOperatorVault,
-  usdt,
-  cngn,
-  type DeployedVault,
-} from './fixtures/operatorVault.fixture'
-import { seedShares } from './helpers/vaultLifecycle'
+import { CANONICAL_PERMIT2, deployOperatorVault, usdt, cngn } from './fixtures/operatorVault.fixture'
+import { deployExecutorContext, signedExecutorOrder as signedOrder } from './helpers/executor'
 import { signVaultEnvelope } from './helpers/vaultSignatures'
-import type { VaultOrderExecutor } from '../../../typechain-types'
-
-interface ExecutorContext extends DeployedVault {
-  executor: VaultOrderExecutor
-}
-
-let nonceCounter = 1n
 
 describe('VaultOrderExecutor', function () {
-  async function deployExecutorContext(): Promise<ExecutorContext> {
-    const ctx = await deployOperatorVault({
-      realUniswapX: true,
-      enableYield: true,
-      minLiquidSettlement: usdt(1_000n),
-    })
-    const Executor = await ethers.getContractFactory('VaultOrderExecutor')
-    const executor = await Executor.deploy(ctx.reactor, await ctx.factory.getAddress())
-    await seedShares(ctx, ctx.lp1, usdt(10_000n))
-    await ctx.vault.allocateIdle() // 9k staked, 1k liquid
-    return { ...ctx, executor }
-  }
-
-  async function signedOrder(
-    ctx: ExecutorContext,
-    o: {
-      inputToken: string
-      inputAmount: bigint
-      outputToken: string
-      outputAmount: bigint
-      taker: string
-      /** Defaults to the real RFQ binding, {taker, executor}: fill() only
-       *  lets a bound filler call it, and the reactor sees the executor. */
-      fillers?: string[]
-    }
-  ) {
-    const [block, epoch, executorAddr] = await Promise.all([
-      ethers.provider.getBlock('latest'),
-      ctx.vault.tradingEpoch(),
-      ctx.executor.getAddress(),
-    ])
-    const { signature, params } = await signVaultEnvelope(ctx.strategy, ctx.risk, {
-      reactor: ctx.reactor,
-      vault: ctx.vault.target as string,
-      permit2: CANONICAL_PERMIT2,
-      chainId: 31337,
-      nonce: (epoch << 128n) | nonceCounter++,
-      deadline: BigInt(block!.timestamp + 600),
-      preferredFiller: ctx.preferredFiller,
-      fillers: [o.taker, executorAddr],
-      ...o,
-    })
-    return { order: encodeLimitOrder(params), sig: signature }
-  }
-
   it('rejects zero constructor addresses', async function () {
     const ctx = await deployOperatorVault({ realUniswapX: true })
     const Executor = await ethers.getContractFactory('VaultOrderExecutor')

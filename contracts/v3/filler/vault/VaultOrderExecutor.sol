@@ -27,7 +27,7 @@ interface IFeeControllerSource {
  *         this contract calls `prepareSettlement`, then executes as the
  *         UniswapX filler: it receives the input and pays the output, both of
  *         which are forwarded to `msg.sender` in the same transaction. It
- *         never holds tokens across transactions.
+ *         never holds tokens or native across transactions.
  * @dev Preferred-filler exclusivity is re-imposed at the wrapper. The reactor
  *      sees this contract as the filler, so `PreferredFillerValidation` alone
  *      would let any caller of `fill()` receive the Permit2 input — front-running
@@ -37,6 +37,11 @@ interface IFeeControllerSource {
  *      as filler, does not count. VaultPolicy forces `exclusiveUntil >= deadline`
  *      on every vault order, so a vault order is taker-exclusive for its whole
  *      fillable life — there is no open window to fall through to.
+ * @dev The reactor ends every execute by refunding its whole native balance
+ *      to `msg.sender` — here, this contract — and reverts if that fails.
+ *      Its `receive()` is open, so anyone can leave 1 wei in it; without a
+ *      `receive()` here that wei would revert every `fill()`. So native is
+ *      accepted and passed on to the caller, best effort.
  */
 contract VaultOrderExecutor is ReentrancyGuard {
   using SafeERC20 for IERC20;
@@ -44,6 +49,11 @@ contract VaultOrderExecutor is ReentrancyGuard {
 
   IReactor public immutable reactor;
   IOperatorVaultFactory public immutable factory;
+
+  /// @dev Gas for the best-effort refund pass-through. Enough for a smart
+  ///      wallet's receive(), small enough that a hostile one can't starve
+  ///      the rest of the fill.
+  uint256 private constant REFUND_GAS = 50_000;
 
   event ExecutorFill(
     address indexed vault,
@@ -106,10 +116,25 @@ contract VaultOrderExecutor is ReentrancyGuard {
     // supply cap) must not revert a fill the reactor already completed. Idle
     // just stays liquid until a later allocateIdle succeeds.
     try IOperatorVault(vault).allocateIdle() {} catch {}
+    _forwardNative();
 
     emit ExecutorFill(
       vault, msg.sender, address(inputToken), order.input.amount, address(outputToken), outputAmount
     );
+  }
+
+  /// @dev Accepts the reactor's end-of-fill refund.
+  receive() external payable {}
+
+  /// @dev Pass the reactor's refund on to the caller. Never reverts and gas
+  ///      is capped: a caller that can't take native keeps its fill, and the
+  ///      dust waits here for the next caller who can.
+  function _forwardNative() private {
+    uint256 balance = address(this).balance;
+    if (balance == 0) return;
+    // solhint-disable-next-line avoid-low-level-calls
+    (bool ok,) = msg.sender.call{ value: balance, gas: REFUND_GAS }("");
+    ok; // best effort
   }
 
   /// @dev Gate `fill()` on the order's own preferred-filler binding so the
