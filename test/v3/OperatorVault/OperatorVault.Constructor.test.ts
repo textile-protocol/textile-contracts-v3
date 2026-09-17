@@ -1,8 +1,11 @@
 import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
+import { MAX_MANAGEMENT_FEE_WAD } from '../../../constants/src/operatorVaultMath'
+
 import {
   DAY,
+  PROTOCOL_FEE_SHARE_WAD,
   defaultInit,
   deployOperatorVault,
   vaultSigners,
@@ -37,8 +40,19 @@ describe('OperatorVault — constructor and views', function () {
     fat.settlementAsset = await ctx.settlement.getAddress()
     fat.corridorAsset = await ctx.corridor.getAddress()
     fat.operatorAdmin = ctx.other.address
-    fat.managementFeeWad = 10n ** 17n + 1n
+    fat.managementFeeWad = MAX_MANAGEMENT_FEE_WAD + 1n
     await expect(ctx.factory.connect(ctx.other).deployVault(fat)).to.be.reverted
+  })
+
+  it('exposes the factory and, through it, the protocol fee cut', async function () {
+    const ctx = await deployOperatorVault()
+    expect(await ctx.vault.factory()).to.equal(await ctx.factory.getAddress())
+    expect(await ctx.factory.protocolFeeRecipient()).to.equal(ctx.protocolFeeRecipient.address)
+    expect(await ctx.factory.protocolFeeShareWad()).to.equal(PROTOCOL_FEE_SHARE_WAD)
+    const [recipient, share] = await ctx.factory.protocolFee()
+    expect(recipient).to.equal(ctx.protocolFeeRecipient.address)
+    expect(share).to.equal(PROTOCOL_FEE_SHARE_WAD)
+    expect(await ctx.factory.VERSION()).to.equal(2)
   })
 
   it('rejects tokens with missing or zero decimals', async function () {

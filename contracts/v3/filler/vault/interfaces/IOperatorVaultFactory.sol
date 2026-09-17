@@ -12,6 +12,14 @@ interface IOperatorVaultFactory {
 
   function isVault(address vault) external view returns (bool);
 
+  /// @notice Protocol cut of every fee accrual, management and performance
+  ///         alike, in every vault this factory deploys: where it is minted, and the WAD fraction of the
+  ///         accrual it takes. Immutable — a new cut means a new factory.
+  function protocolFeeRecipient() external view returns (address);
+  function protocolFeeShareWad() external view returns (uint256);
+  /// @notice Both of the above in one read; what the vaults call at checkpoint.
+  function protocolFee() external view returns (address recipient, uint256 shareWad);
+
   /// @notice The most recently indexed vault for the tuple, or zero when the
   ///         operator has none. An operator may hold several — this is the
   ///         one a caller recovering a lost deploy receipt is looking for.

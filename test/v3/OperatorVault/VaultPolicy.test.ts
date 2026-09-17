@@ -2,6 +2,8 @@ import { expect } from 'chai'
 import { AbiCoder } from 'ethers'
 import { ethers } from 'hardhat'
 
+import * as math from '../../../constants/src/operatorVaultMath'
+
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { encodeValidationData, freshAttestation, signAttestation } from './helpers/vaultSignatures'
 
@@ -242,6 +244,7 @@ describe('VaultPolicy', function () {
       emergencyExitTimeout: 7 * DAY,
       valuationTimeout: DAY,
       managementFeeWad: 0n,
+      performanceFeeWad: 0n,
       riskSignerDelay: DAY,
       minDepositAssets: usdt(1n),
       minDepositCorridor: 0n,
@@ -310,7 +313,12 @@ describe('VaultPolicy', function () {
     await expect(ctx.harness.validateConfig({ ...cfg, preferredFillerValidation: ethers.ZeroAddress }))
       .to.be.reverted
     await expect(ctx.harness.validateConfig(cfg)).to.not.be.reverted
-    await expect(ctx.harness.validateConfig({ ...cfg, managementFeeWad: 10n ** 17n })).to.not.be
-      .reverted
+    for (const [field, cap] of [
+      ['managementFeeWad', math.MAX_MANAGEMENT_FEE_WAD],
+      ['performanceFeeWad', math.MAX_PERFORMANCE_FEE_WAD],
+    ] as const) {
+      await expect(ctx.harness.validateConfig({ ...cfg, [field]: cap })).to.not.be.reverted
+      await expect(ctx.harness.validateConfig({ ...cfg, [field]: cap + 1n })).to.be.reverted
+    }
   })
 })

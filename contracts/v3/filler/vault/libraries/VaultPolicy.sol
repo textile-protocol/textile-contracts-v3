@@ -46,7 +46,10 @@ interface IVaultSignatureSource {
 library VaultPolicy {
   using SafeERC20 for IERC20;
 
-  uint256 internal constant MAX_MANAGEMENT_FEE_WAD = 1e17;
+  /// @notice Annual management-fee ceiling: 25% of supply per year.
+  uint256 internal constant MAX_MANAGEMENT_FEE_WAD = 25e16;
+  /// @notice 50% of the gain above the mark; also keeps `nav - feeAssets` positive.
+  uint256 internal constant MAX_PERFORMANCE_FEE_WAD = 50e16;
   uint8 internal constant MAX_TOKEN_DECIMALS = 18;
 
   struct OrderContext {
@@ -95,9 +98,64 @@ library VaultPolicy {
     _requireSafeDuration(cfg.emergencyExitTimeout);
     _requireSafeDuration(cfg.valuationTimeout);
     _requireSafeDuration(cfg.riskSignerDelay);
-    if (cfg.managementFeeWad > MAX_MANAGEMENT_FEE_WAD) revert VaultErrors.InvalidParams();
+    if (cfg.managementFeeWad > MAX_MANAGEMENT_FEE_WAD || cfg.performanceFeeWad > MAX_PERFORMANCE_FEE_WAD) {
+      revert VaultErrors.InvalidParams();
+    }
     settlementDecimals_ = _requireDecimals(address(cfg.settlementAsset));
     corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
+  }
+
+  /// @notice One checkpoint, both fee legs, split with the protocol. One call: the vault has no bytecode for two.
+  /// @param navAssets Attested NAV, never a live read; zero skips the performance leg.
+  function checkpointAccrual(
+    uint256 supply,
+    uint256 elapsed,
+    uint256 navAssets,
+    uint256 markWad,
+    uint256 managementFeeWad,
+    uint256 performanceFeeWad
+  )
+    external
+    view
+    returns (uint256 operatorShares, uint256 protocolShares, address protocolRecipient, uint256 newMarkWad)
+  {
+    // Performance is charged net of the management leg.
+    uint256 shares = VaultLib.feeShares(supply, managementFeeWad, elapsed);
+    newMarkWad = supply == 0 ? VaultLib.WAD : markWad;
+    if (navAssets != 0) {
+      uint256 perf = VaultLib.performanceFeeShares(navAssets, supply + shares, newMarkWad, performanceFeeWad);
+      newMarkWad = VaultLib.markAfter(navAssets, supply + shares + perf, newMarkWad);
+      shares += perf;
+    }
+    if (shares == 0) return (0, 0, address(0), newMarkWad);
+    uint256 shareWad;
+    (protocolRecipient, shareWad) = _factory().protocolFee();
+    (operatorShares, protocolShares) = VaultLib.splitFee(shares, shareWad);
+  }
+
+  /// @dev Runs under delegatecall, so `address(this)` is the vault and its
+  ///      `factory` is the immutable the vault was deployed with. Read here
+  ///      rather than passed in: an immutable costs the vault 33 bytes per
+  ///      read site and the vault has none to spare.
+  function _factory() private view returns (IOperatorVaultFactory) {
+    return IOperatorVaultFactory(IOperatorVault(address(this)).factory());
+  }
+
+  /// @notice Size and address checks for `requestRedeem`. Both fee recipients
+  ///         are exempt from the floor: their positions are pure dilution
+  ///         residue and there is no other way out of the vault.
+  function validateRedeemRequest(
+    uint256 shares,
+    uint256 minRedeemShares,
+    address controller,
+    address owner,
+    address feeRecipient
+  ) external view {
+    if (
+      shares == 0
+        || (shares < minRedeemShares && owner != feeRecipient && owner != _factory().protocolFeeRecipient())
+    ) revert VaultErrors.BelowMinSize();
+    if (controller == address(0) || owner == address(0)) revert VaultErrors.ZeroAddress();
   }
 
   /// @notice Bind a freshly cloned adapter to the calling vault and approve it

@@ -7,6 +7,7 @@ import {
   ERC1271_FAIL,
   ERC1271_MAGIC,
   PRICE_1,
+  PROTOCOL_FEE_SHARE_WAD,
   RAY,
   accrueAaveInterest,
   defaultInit,
@@ -79,7 +80,14 @@ describe('OperatorVault — idle yield', function () {
       const Factory = await ethers.getContractFactory('OperatorVaultFactory', {
         libraries: { VaultDeployer: ctx.vaultDeployer },
       })
-      const bare = await Factory.deploy(ctx.reactor, ctx.permit2, ctx.preferredFiller, ethers.ZeroAddress)
+      const bare = await Factory.deploy(
+        ctx.reactor,
+        ctx.permit2,
+        ctx.preferredFiller,
+        ethers.ZeroAddress,
+        ctx.protocolFeeRecipient.address,
+        PROTOCOL_FEE_SHARE_WAD
+      )
       const init = defaultInit(ctx, { enableYield: true })
       init.settlementAsset = await ctx.settlement.getAddress()
       init.corridorAsset = await ctx.corridor.getAddress()

@@ -42,6 +42,7 @@ interface IOperatorVault {
   ///         the earliest event on a vault names the deploy-time floor.
   event MinLiquidSettlementUpdated(uint256 previous, uint256 current);
   event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
+  event HighWaterMarkUpdated(uint256 markWad);
   event NavSettled(uint256 nav, uint256 timestamp);
   event OperatorSet(address indexed account, address indexed operator, bool approved);
   event Paused(address indexed guardian);
@@ -152,6 +153,9 @@ interface IOperatorVault {
   function recallAll() external;
 
   function settlementAsset() external view returns (IERC20);
+  /// @notice The OperatorVaultFactory that deployed this vault. Immutable;
+  ///         it also carries the protocol's fee cut.
+  function factory() external view returns (address);
   function corridorAsset() external view returns (IERC20);
   function operatorAdmin() external view returns (address);
   function pendingOperatorAdmin() external view returns (address);

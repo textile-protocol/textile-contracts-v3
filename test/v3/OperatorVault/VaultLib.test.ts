@@ -34,6 +34,45 @@ describe('VaultLib', function () {
     expect(await harness.feeShares(1000, WAD / 10n, 365 * 24 * 60 * 60)).to.equal(100)
   })
 
+  it('matches the TS reference for the performance fee and the mark', async function () {
+    const { harness } = await deployOperatorVault()
+    const supply = 1_000_000n * WAD
+    const navAssets = 1_100_000n * WAD
+
+    for (const [n, sup, mark, fee] of [
+      [navAssets, supply, WAD, WAD / 5n],
+      [navAssets, supply, (WAD * 12n) / 10n, WAD / 5n], // under the mark
+      [navAssets, 0n, WAD, WAD / 5n],
+      [navAssets, supply, WAD, 0n],
+    ] as const) {
+      expect(await harness.performanceFeeShares(n, sup, mark, fee)).to.equal(
+        math.performanceFeeShares(n, sup, mark, fee)
+      )
+    }
+
+    // Ratchets up, never down; an empty vault re-bases to par.
+    expect(await harness.markAfter(200n, 100n, WAD)).to.equal(2n * WAD)
+    expect(await harness.markAfter(50n, 100n, WAD)).to.equal(WAD)
+    expect(await harness.markAfter(50n, 0n, 2n * WAD)).to.equal(WAD)
+  })
+
+  it('splits a fee accrual so the two legs always sum to the whole', async function () {
+    const { harness } = await deployOperatorVault()
+    const tenth = WAD / 10n
+    // The protocol leg rounds down; the operator keeps the dust.
+    for (const [shares, share, op, proto] of [
+      [1000n, tenth, 900n, 100n],
+      [1009n, tenth, 909n, 100n],
+      [9n, tenth, 9n, 0n],
+      [1000n, 0n, 1000n, 0n],
+      [1000n, WAD, 0n, 1000n],
+      [0n, tenth, 0n, 0n],
+    ] as const) {
+      expect(await harness.splitFee(shares, share)).to.deep.equal([op, proto])
+      expect(math.splitFee(shares, share)).to.deep.equal({ operatorShares: op, protocolShares: proto })
+    }
+  })
+
   it('packs and unpacks the trading epoch in the Permit2 nonce', async function () {
     const { harness } = await deployOperatorVault()
     const nonce = await harness.tradingNonce(7, 99)

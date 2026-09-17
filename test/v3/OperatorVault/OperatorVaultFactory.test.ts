@@ -3,6 +3,8 @@ import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
 import {
+  PROTOCOL_FEE_SHARE_WAD,
+  WAD,
   defaultInit,
   deployOperatorVault,
   vaultSigners,
@@ -22,7 +24,7 @@ describe('OperatorVaultFactory', function () {
     ).to.equal(await vault.getAddress())
     expect(await factory.reactor()).to.equal(reactor)
     expect(await factory.permit2()).to.equal(permit2)
-    expect(await factory.VERSION()).to.equal(1)
+    expect(await factory.VERSION()).to.equal(2)
   })
 
   it('names the share token from the init and announces it in VaultDeployed', async function () {
@@ -152,11 +154,19 @@ describe('OperatorVaultFactory', function () {
       libraries: { VaultDeployer: vaultDeployer },
     })
     const addr = ethers.Wallet.createRandom().address
-    await expect(Factory.deploy(ethers.ZeroAddress, addr, addr, addr)).to.be.reverted
-    await expect(Factory.deploy(addr, ethers.ZeroAddress, addr, addr)).to.be.reverted
-    await expect(Factory.deploy(addr, addr, ethers.ZeroAddress, addr)).to.be.reverted
+    const share = PROTOCOL_FEE_SHARE_WAD
+    await expect(Factory.deploy(ethers.ZeroAddress, addr, addr, addr, addr, share)).to.be.reverted
+    await expect(Factory.deploy(addr, ethers.ZeroAddress, addr, addr, addr, share)).to.be.reverted
+    await expect(Factory.deploy(addr, addr, ethers.ZeroAddress, addr, addr, share)).to.be.reverted
+    // The protocol cut is the one thing an operator cannot change after the
+    // fact, so a factory with no recipient or more than half the fee never
+    // deploys in the first place.
+    await expect(Factory.deploy(addr, addr, addr, addr, ethers.ZeroAddress, share)).to.be.reverted
+    await expect(Factory.deploy(addr, addr, addr, addr, addr, WAD / 2n + 1n)).to.be.reverted
+    await expect(Factory.deploy(addr, addr, addr, addr, addr, WAD / 2n)).to.not.be.reverted
+    await expect(Factory.deploy(addr, addr, addr, addr, addr, 0n)).to.not.be.reverted
     // A zero yield adapter implementation is allowed: yield just cannot be enabled.
-    await expect(Factory.deploy(addr, addr, addr, ethers.ZeroAddress)).to.not.be.reverted
+    await expect(Factory.deploy(addr, addr, addr, ethers.ZeroAddress, addr, share)).to.not.be.reverted
   })
 
   it('wires Permit2 approvals on the two corridor assets', async function () {

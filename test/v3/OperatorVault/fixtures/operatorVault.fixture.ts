@@ -2,6 +2,7 @@ import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers'
 import { Wallet, ethers } from 'ethers'
 import { ethers as hreEthers } from 'hardhat'
 
+import { OPERATOR_VAULT_PROTOCOL_FEE_SHARE_WAD } from '../../../../constants/src/operatorVaultMath'
 import { CANONICAL_PERMIT2, etchPermit2 } from '../../helpers/etchPermit2'
 import {
   AaveV3PoolMock,
@@ -21,6 +22,8 @@ export const ERC1271_MAGIC = '0x1626ba7e'
 export const ERC1271_FAIL = '0xffffffff'
 export { CANONICAL_PERMIT2 }
 
+/** The cut Textile's factories are deployed with — the deploy script's own constant. */
+export const PROTOCOL_FEE_SHARE_WAD = OPERATOR_VAULT_PROTOCOL_FEE_SHARE_WAD
 export const usdt = (n: bigint) => n * 10n ** 6n
 export const cngn = (n: bigint) => n * 10n ** 18n
 
@@ -32,6 +35,8 @@ export interface VaultSigners {
   risk: Wallet
   guardian: SignerWithAddress
   feeRecipient: SignerWithAddress
+  /** Textile's cut lands here. A factory immutable, not a vault role. */
+  protocolFeeRecipient: SignerWithAddress
   lp1: SignerWithAddress
   lp2: SignerWithAddress
   other: SignerWithAddress
@@ -44,7 +49,7 @@ async function fundedWallet(funder: SignerWithAddress): Promise<Wallet> {
 }
 
 export async function vaultSigners(): Promise<VaultSigners> {
-  const [deployer, operatorAdmin, riskAdmin, guardian, feeRecipient, lp1, lp2, other] =
+  const [deployer, operatorAdmin, riskAdmin, guardian, feeRecipient, lp1, lp2, other, protocolFeeRecipient] =
     await hreEthers.getSigners()
   const strategy = await fundedWallet(deployer)
   const risk = await fundedWallet(deployer)
@@ -56,6 +61,7 @@ export async function vaultSigners(): Promise<VaultSigners> {
     risk,
     guardian,
     feeRecipient,
+    protocolFeeRecipient,
     lp1,
     lp2,
     other,
@@ -64,6 +70,7 @@ export async function vaultSigners(): Promise<VaultSigners> {
 
 export interface VaultInitOverrides {
   managementFeeWad?: bigint
+  performanceFeeWad?: bigint
   minReserveSettlement?: bigint
   minReserveCorridor?: bigint
   minDepositAssets?: bigint
@@ -81,6 +88,9 @@ export interface VaultInitOverrides {
   maxOrderInputCorridor?: bigint
   enableYield?: boolean
   minLiquidSettlement?: bigint
+  /** Factory-level protocol cut of the management fee, WAD. Defaults to the
+   *  10% Textile deploys with. 0n deploys a factory that takes nothing. */
+  protocolFeeShareWad?: bigint
   /** Etch the real Permit2 and deploy the vendored LimitOrderReactor +
    *  PreferredFillerValidation instead of random EOA placeholders. */
   realUniswapX?: boolean
@@ -127,6 +137,7 @@ export function defaultInit(s: VaultSigners, extras: VaultInitOverrides = {}) {
     emergencyExitTimeout: extras.emergencyExitTimeout ?? 7 * DAY,
     valuationTimeout: extras.valuationTimeout ?? DAY,
     managementFeeWad: extras.managementFeeWad ?? 0n,
+    performanceFeeWad: extras.performanceFeeWad ?? 0n,
     riskSignerDelay: extras.riskSignerDelay ?? DAY,
     minDepositAssets: extras.minDepositAssets ?? usdt(100n),
     minDepositCorridor: extras.minDepositCorridor ?? cngn(100n),
@@ -203,7 +214,9 @@ export async function deployOperatorVault(
     reactor,
     permit2,
     preferredFiller,
-    await adapterImpl.getAddress()
+    await adapterImpl.getAddress(),
+    signers.protocolFeeRecipient.address,
+    extras.protocolFeeShareWad ?? PROTOCOL_FEE_SHARE_WAD
   )
 
   const init = defaultInit(signers, extras)

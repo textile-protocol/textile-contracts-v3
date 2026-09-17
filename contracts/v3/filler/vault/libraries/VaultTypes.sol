@@ -51,6 +51,8 @@ library VaultTypes {
     uint256 emergencyExitTimeout;
     uint256 valuationTimeout;
     uint256 managementFeeWad;
+    /// @dev Share of the gain above the high-water mark, WAD. Zero = off.
+    uint256 performanceFeeWad;
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
     /// @dev Minimum corridor-asset deposit, in corridor atomic units. Zero
@@ -85,6 +87,7 @@ library VaultTypes {
     uint256 emergencyExitTimeout;
     uint256 valuationTimeout;
     uint256 managementFeeWad;
+    uint256 performanceFeeWad;
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
     uint256 minDepositCorridor;

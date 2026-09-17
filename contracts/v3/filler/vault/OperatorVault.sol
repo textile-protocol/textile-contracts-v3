@@ -59,7 +59,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   IERC20 public immutable override settlementAsset;
   IERC20 public immutable override corridorAsset;
-  address public immutable factory;
+  address public immutable override factory;
   address public immutable reactor;
   address public immutable permit2;
   address public immutable preferredFillerValidation;
@@ -75,6 +75,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   uint256 public immutable emergencyExitTimeout;
   uint256 public immutable valuationTimeout;
   uint256 public immutable managementFeeWad;
+  /// @notice Share of the gain above `highWaterMarkWad`, WAD. Zero = off.
+  uint256 public immutable performanceFeeWad;
   uint256 public immutable riskSignerDelay;
   uint256 public immutable minDepositAssets;
   /// @notice In corridor units. Zero disables corridor deposits.
@@ -107,6 +109,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   uint256 public currentRedeemEpochId;
   uint256 public closedRedeemEpochId;
   uint256 public lastFeeCheckpoint;
+  /// @notice Performance-fee high-water mark, WAD assets per share. Only ever rises.
+  uint256 public highWaterMarkWad;
   uint256 public lastSettledNav;
   uint256 public lastRedeemSettledAt;
   uint256 public pendingSettlement;
@@ -202,6 +206,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     emergencyExitTimeout = cfg.emergencyExitTimeout;
     valuationTimeout = cfg.valuationTimeout;
     managementFeeWad = cfg.managementFeeWad;
+    performanceFeeWad = cfg.performanceFeeWad;
     riskSignerDelay = cfg.riskSignerDelay;
     minDepositAssets = cfg.minDepositAssets;
     minDepositCorridor = cfg.minDepositCorridor;
@@ -301,10 +306,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     }
 
     uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
-    _checkpointFee();
+    // NAV before the checkpoint, supply after: this epoch converts at the post-fee price.
+    (uint256 conversionNav,,,) = _requireLiveNav(attestation, price);
+    _checkpointFee(conversionNav);
 
     uint256 supply = totalSupply();
-    (uint256 conversionNav,,) = _requireLiveNav(attestation, price);
     uint256 assets = epoch.assets;
     bool inCorridor = epoch.inCorridor;
     // Corridor is valued at the signed price first, then converts like settlement.
@@ -349,18 +355,16 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   /// @inheritdoc IOperatorVault
   /// @dev Deliberately no pause check, unlike `requestDeposit`: exits must
   ///      always be able to queue; only new capital is blocked while paused.
-  ///      The fee recipient is exempt from `minRedeemShares`: its position is
-  ///      pure dilution residue, and there is no other way out of the vault.
+  ///      Both fee recipients are exempt from `minRedeemShares`: their
+  ///      positions are pure dilution residue, and there is no other way out
+  ///      of the vault.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     override
     nonReentrant
     returns (uint256 requestId)
   {
-    if (shares == 0 || (shares < minRedeemShares && owner != _roles.feeRecipient)) {
-      revert VaultErrors.BelowMinSize();
-    }
-    if (controller == address(0) || owner == address(0)) revert VaultErrors.ZeroAddress();
+    VaultPolicy.validateRedeemRequest(shares, minRedeemShares, controller, owner, _roles.feeRecipient);
 
     requestId = _openOrCurrentRedeemEpoch();
     _pullShares(owner, shares);
@@ -397,9 +401,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     Epoch storage epoch = _closedEpoch(epochId, false);
     _recallAll();
     uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
-    _checkpointFee();
+    (uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC) =
+      _requireLiveNav(attestation, price);
+    // Paused pays live balances (below), so the fee is charged on live NAV too.
+    bool isPaused = paused;
+    _checkpointFee(isPaused ? liveNav : conversionNav);
     uint256 supply = totalSupply();
-    (, uint256 freeS, uint256 freeC) = _requireLiveNav(attestation, price);
 
     uint256 shares = epoch.assets;
     // Snapshot pro-rata while anyone else still holds shares, so a UniswapX
@@ -409,7 +416,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     // swap output as orphaned NAV. When paused, use live as the floor so a
     // hostile risk key cannot settle a partial epoch at 0 and lock out
     // `settleRedeemEmergencyInKind`.
-    bool isPaused = paused;
     if (shares == supply && !isPaused) revert VaultErrors.PauseRequired();
     uint256 floorS = isPaused ? freeS : attestation.freeSettlement;
     uint256 floorC = isPaused ? freeC : attestation.freeCorridor;
@@ -438,7 +444,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     // exit already owes redeemers is left alone and not resold here.
     uint256 stranded = VaultPolicy.tryRecallAllIdle(yieldAdapter, _owedAssets());
 
-    _checkpointFee();
+    _checkpointFee(0);
     uint256 supply = totalSupply();
     uint256 freeS = _liquidSettlement();
     uint256 freeC = _freeCorridor();
@@ -676,7 +682,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   function setFeeRecipient(address next) external onlyOperatorAdmin nonReentrant {
     if (next == address(0)) revert VaultErrors.ZeroAddress();
-    _checkpointFee();
+    _checkpointFee(0);
     emit FeeRecipientUpdated(_roles.feeRecipient, next);
     _roles.feeRecipient = next;
   }
@@ -827,7 +833,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     else currentDepositEpochId = id;
     uint256 cutoffTs = block.timestamp + depositEpochDuration;
     if (cutoffTs > type(uint64).max) revert VaultErrors.InvalidParams();
-    epochs[id] = _newEpoch(true, inCorridor, uint64(cutoffTs));
+    _openEpoch(id, true, inCorridor, uint64(cutoffTs));
   }
 
   function _openOrCurrentRedeemEpoch() private returns (uint256 id) {
@@ -835,24 +841,17 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     if (id != 0 && epochs[id].state == EpochState.Open) return id;
     id = nextEpochId++;
     currentRedeemEpochId = id;
-    epochs[id] = _newEpoch(false, false, 0);
+    _openEpoch(id, false, false, 0);
   }
 
-  function _newEpoch(bool isDeposit, bool inCorridor, uint64 cutoff) private view returns (Epoch memory) {
-    return Epoch({
-      state: EpochState.Open,
-      isDeposit: isDeposit,
-      openedAt: uint64(block.timestamp),
-      cutoff: cutoff,
-      closedAt: 0,
-      assets: 0,
-      shares: 0,
-      remainingUnits: 0,
-      remainingSettlement: 0,
-      remainingCorridor: 0,
-      remainingYield: 0,
-      inCorridor: inCorridor
-    });
+  /// @dev `id` is never reused, so the slot is virgin and only non-zero fields need writing.
+  function _openEpoch(uint256 id, bool isDeposit, bool inCorridor, uint64 cutoff) private {
+    Epoch storage epoch = epochs[id];
+    epoch.state = EpochState.Open;
+    epoch.isDeposit = isDeposit;
+    epoch.openedAt = uint64(block.timestamp);
+    if (cutoff != 0) epoch.cutoff = cutoff;
+    if (inCorridor) epoch.inCorridor = true;
   }
 
   function _finishRedeemSettle(
@@ -883,12 +882,28 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     emit NavSettled(settled, block.timestamp);
   }
 
-  function _checkpointFee() private {
+  /// @dev One accrual, two recipients. The operator leg plus the protocol leg
+  ///      is exactly the dilution LPs bore before the split existed; see
+  ///      `VaultPolicy.feeAccrual`. Textile's cut lives on the factory, which
+  ///      is immutable and has no owner, and `factory` is immutable here, so
+  ///      nothing can point this at a different source.
+  /// @param navAssets Attested NAV; zero on the unpriced paths skips the performance leg.
+  function _checkpointFee(uint256 navAssets) private {
     uint256 elapsed = block.timestamp - lastFeeCheckpoint;
     lastFeeCheckpoint = block.timestamp;
-    uint256 shares = VaultLib.feeShares(totalSupply(), managementFeeWad, elapsed);
+    uint256 mark = highWaterMarkWad;
+    (uint256 operatorShares, uint256 protocolShares, address protocolRecipient, uint256 newMark) =
+      VaultPolicy.checkpointAccrual(totalSupply(), elapsed, navAssets, mark, managementFeeWad, performanceFeeWad);
+    if (newMark != mark) {
+      highWaterMarkWad = newMark;
+      emit HighWaterMarkUpdated(newMark);
+    }
+    _accrueFee(_roles.feeRecipient, operatorShares, elapsed);
+    _accrueFee(protocolRecipient, protocolShares, elapsed);
+  }
+
+  function _accrueFee(address recipient, uint256 shares, uint256 elapsed) private {
     if (shares == 0) return;
-    address recipient = _roles.feeRecipient;
     _mint(recipient, shares);
     emit FeeAccrued(recipient, shares, elapsed);
   }
@@ -1006,12 +1021,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   function _requireLiveNav(VaultLib.NavAttestation calldata att, uint256 priceWad)
     private
     view
-    returns (uint256 conversionNav, uint256 freeS, uint256 freeC)
+    returns (uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC)
   {
     if (att.lastSettledNav != lastSettledNav) revert VaultErrors.InvalidAttestation();
     freeS = _freeSettlement();
     freeC = _freeCorridor();
-    uint256 liveNav = VaultLib.nav(freeS, freeC, priceWad, settlementDecimals, corridorDecimals);
+    liveNav = VaultLib.nav(freeS, freeC, priceWad, settlementDecimals, corridorDecimals);
     if (liveNav < att.nav) revert VaultErrors.InconsistentNav();
     if (freeS < att.freeSettlement || freeC < att.freeCorridor) revert VaultErrors.InconsistentNav();
     conversionNav = att.nav;

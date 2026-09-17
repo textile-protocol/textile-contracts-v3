@@ -21,9 +21,12 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
  *         has no upgrade authority over deployed vaults.
  */
 contract OperatorVaultFactory is IOperatorVaultFactory {
-  uint256 public constant VERSION = 1;
+  uint256 public constant VERSION = 2;
   uint256 public constant MAX_NAME_BYTES = 64;
   uint256 public constant MAX_SYMBOL_BYTES = 16;
+  /// @notice The protocol may take at most half of an operator's fee. A
+  ///         fat-fingered deploy cannot mint a factory that takes it all.
+  uint256 public constant MAX_PROTOCOL_FEE_SHARE_WAD = 5e17;
 
   address public immutable reactor;
   address public immutable permit2;
@@ -31,6 +34,12 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   /// @notice Yield adapter implementation cloned per vault. Zero = this
   ///         factory cannot enable idle yield.
   address public immutable yieldAdapterImplementation;
+  /// @notice Protocol cut of every vault's fee accruals, baked into each
+  ///         vault at deploy. Immutable here too: changing either means a
+  ///         new factory, exactly like a SellFirstFeeController rotation, so
+  ///         no key can redirect fees on a live vault.
+  address public immutable override protocolFeeRecipient;
+  uint256 public immutable override protocolFeeShareWad;
 
   /// @dev Vaults per (operatorAdmin, settlement, corridor, VERSION), oldest
   ///      first. Append-only apart from `rekeyOperator`, which moves a single
@@ -60,15 +69,26 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     address reactor_,
     address permit2_,
     address preferredFillerValidation_,
-    address yieldAdapterImplementation_
+    address yieldAdapterImplementation_,
+    address protocolFeeRecipient_,
+    uint256 protocolFeeShareWad_
   ) {
-    if (reactor_ == address(0) || permit2_ == address(0) || preferredFillerValidation_ == address(0)) {
-      revert VaultErrors.ZeroAddress();
-    }
+    if (
+      reactor_ == address(0) || permit2_ == address(0) || preferredFillerValidation_ == address(0)
+        || protocolFeeRecipient_ == address(0)
+    ) revert VaultErrors.ZeroAddress();
+    if (protocolFeeShareWad_ > MAX_PROTOCOL_FEE_SHARE_WAD) revert VaultErrors.InvalidParams();
     reactor = reactor_;
     permit2 = permit2_;
     preferredFillerValidation = preferredFillerValidation_;
     yieldAdapterImplementation = yieldAdapterImplementation_;
+    protocolFeeRecipient = protocolFeeRecipient_;
+    protocolFeeShareWad = protocolFeeShareWad_;
+  }
+
+  /// @inheritdoc IOperatorVaultFactory
+  function protocolFee() external view returns (address recipient, uint256 shareWad) {
+    return (protocolFeeRecipient, protocolFeeShareWad);
   }
 
   /// @inheritdoc IOperatorVaultFactory
@@ -107,6 +127,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       emergencyExitTimeout: init.emergencyExitTimeout,
       valuationTimeout: init.valuationTimeout,
       managementFeeWad: init.managementFeeWad,
+      performanceFeeWad: init.performanceFeeWad,
       riskSignerDelay: init.riskSignerDelay,
       minDepositAssets: init.minDepositAssets,
       minDepositCorridor: init.minDepositCorridor,

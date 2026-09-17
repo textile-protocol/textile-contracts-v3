@@ -97,6 +97,39 @@ library VaultLib {
     return Math.mulDiv(supply, feeWad * elapsed, WAD * YEAR);
   }
 
+  /// @notice Split one fee accrual between the operator and the protocol.
+  ///         The protocol leg rounds down and the operator keeps the dust, so
+  ///         the two always sum to `shares` exactly: the LP-side dilution is
+  ///         `feeShares` regardless of how it is divided.
+  function splitFee(uint256 shares, uint256 protocolShareWad)
+    internal
+    pure
+    returns (uint256 operatorShares, uint256 protocolShares)
+  {
+    protocolShares = Math.mulDiv(shares, protocolShareWad, WAD);
+    operatorShares = shares - protocolShares;
+  }
+
+  /// @notice `feeWad` of the NAV above the mark, minted against post-fee NAV; the cap < 100% keeps the denominator > 0.
+  function performanceFeeShares(uint256 navAssets, uint256 supply, uint256 markWad, uint256 feeWad)
+    internal
+    pure
+    returns (uint256)
+  {
+    if (supply == 0 || feeWad == 0) return 0;
+    uint256 mark = Math.mulDiv(markWad, supply, WAD);
+    if (navAssets <= mark) return 0;
+    uint256 feeAssets = Math.mulDiv(navAssets - mark, feeWad, WAD);
+    if (feeAssets == 0) return 0;
+    return Math.mulDiv(feeAssets, supply, navAssets - feeAssets);
+  }
+
+  /// @notice Never re-bases down, so a recovery is not charged twice; an empty vault resets to par.
+  function markAfter(uint256 navAssets, uint256 supply, uint256 markWad) internal pure returns (uint256) {
+    if (supply == 0) return WAD;
+    return Math.max(markWad, Math.mulDiv(navAssets, WAD, supply));
+  }
+
   /// @notice Permit2 nonce: trading epoch in the upper 128 bits, quote counter below.
   function tradingNonce(uint256 epoch, uint256 counter) internal pure returns (uint256) {
     return (epoch << EPOCH_NONCE_SHIFT) | counter;
