@@ -9,7 +9,6 @@ import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IOperatorVault } from "./interfaces/IOperatorVault.sol";
-import { IOperatorVaultFactory } from "./interfaces/IOperatorVaultFactory.sol";
 import { IYieldAdapter } from "./interfaces/IYieldAdapter.sol";
 import { VaultErrors } from "./libraries/VaultErrors.sol";
 import { VaultLib } from "./libraries/VaultLib.sol";
