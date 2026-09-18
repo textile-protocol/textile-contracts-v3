@@ -10,7 +10,7 @@ import {
   type DeployedVault,
 } from '../fixtures/operatorVault.fixture'
 
-import { freshAttestation, signAttestation } from './vaultSignatures'
+import { freshAttestation, attestationSignatures } from './vaultSignatures'
 
 export async function closeDeposit(
   ctx: DeployedVault,
@@ -30,8 +30,8 @@ export async function processDeposit(
   price: bigint = PRICE_1
 ): Promise<bigint> {
   const att = await freshAttestation(ctx.vault, epochId, price)
-  const sig = await signAttestation(ctx.harness, ctx.risk, att)
-  await ctx.vault.processDepositEpoch(epochId, att, sig)
+  const sigs = await attestationSignatures(ctx, att)
+  await ctx.vault.processDepositEpoch(epochId, att, ...sigs)
   return att.nav
 }
 
@@ -92,8 +92,8 @@ export async function closeAndSettleRedeem(
 ): Promise<bigint> {
   const id = await closeRedeem(ctx, epochId)
   const att = await freshAttestation(ctx.vault, id, price)
-  const sig = await signAttestation(ctx.harness, ctx.risk, att)
-  await ctx.vault.settleRedeemEpoch(id, att, sig)
+  const sigs = await attestationSignatures(ctx, att)
+  await ctx.vault.settleRedeemEpoch(id, att, ...sigs)
   return id
 }
 

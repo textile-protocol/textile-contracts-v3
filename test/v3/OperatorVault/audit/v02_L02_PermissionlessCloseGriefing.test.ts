@@ -8,12 +8,12 @@ import {
   usdt,
 } from '../fixtures/operatorVault.fixture'
 import { seedShares } from '../helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from '../helpers/vaultSignatures'
+import { attestationSignatures, freshAttestation } from '../helpers/vaultSignatures'
 
 async function settle(ctx: DeployedVault, epochId: bigint) {
   const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-  const sig = await signAttestation(ctx.harness, ctx.risk, att)
-  await ctx.vault.settleRedeemEpoch(epochId, att, sig)
+  const sigs = await attestationSignatures(ctx, att)
+  await ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)
 }
 
 // v0.2 L-02: closeRedeemEpoch used to be open to anyone the moment the

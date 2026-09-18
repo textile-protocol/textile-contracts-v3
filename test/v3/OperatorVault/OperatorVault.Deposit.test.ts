@@ -4,7 +4,7 @@ import { ethers } from 'hardhat'
 
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { closeAndProcessDeposit, pullFromVault } from './helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
+import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 describe('OperatorVault — deposits', function () {
   async function processOpenDeposit() {
@@ -109,8 +109,8 @@ describe('OperatorVault — deposits', function () {
     await ctx.vault.closeDepositEpoch(epochId)
     const bad = await freshAttestation(ctx.vault, epochId, PRICE_1)
     bad.vault = ctx.lp1.address
-    const sig = await signAttestation(ctx.harness, ctx.risk, bad)
-    await expect(ctx.vault.processDepositEpoch(epochId, bad, sig)).to.be.reverted
+    const sigs = await attestationSignatures(ctx, bad)
+    await expect(ctx.vault.processDepositEpoch(epochId, bad, ...sigs)).to.be.reverted
   })
 
   it('rejects an attestation whose NAV does not match live inventory', async function () {
@@ -121,8 +121,8 @@ describe('OperatorVault — deposits', function () {
     await ctx.vault.closeDepositEpoch(epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     att.nav = att.nav + 1n
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.processDepositEpoch(epochId, att, sig)).to.be.revertedWithCustomError(
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.processDepositEpoch(epochId, att, ...sigs)).to.be.revertedWithCustomError(
       ctx.vault,
       'InconsistentNav'
     )
@@ -135,9 +135,9 @@ describe('OperatorVault — deposits', function () {
     await time.increase(DAY)
     await ctx.vault.closeDepositEpoch(epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     await ctx.settlement.mint(await ctx.vault.getAddress(), 2n)
-    await expect(ctx.vault.processDepositEpoch(epochId, att, sig)).to.not.be.reverted
+    await expect(ctx.vault.processDepositEpoch(epochId, att, ...sigs)).to.not.be.reverted
   })
 
   it('rejects a stale attestation after another epoch changes lastSettledNav', async function () {
@@ -156,13 +156,13 @@ describe('OperatorVault — deposits', function () {
     await ctx.vault.processDepositEpoch(
       first,
       firstAtt,
-      await signAttestation(ctx.harness, ctx.risk, firstAtt)
+      ...(await attestationSignatures(ctx, firstAtt))
     )
     await expect(
       ctx.vault.processDepositEpoch(
         second,
         staleSecond,
-        await signAttestation(ctx.harness, ctx.risk, staleSecond)
+        ...(await attestationSignatures(ctx, staleSecond))
       )
     ).to.be.revertedWithCustomError(ctx.vault, 'InvalidAttestation')
 
@@ -170,7 +170,7 @@ describe('OperatorVault — deposits', function () {
     await ctx.vault.processDepositEpoch(
       second,
       freshSecond,
-      await signAttestation(ctx.harness, ctx.risk, freshSecond)
+      ...(await attestationSignatures(ctx, freshSecond))
     )
   })
 
@@ -187,7 +187,7 @@ describe('OperatorVault — deposits', function () {
     const att = await freshAttestation(ctx.vault, second, PRICE_1)
     expect(att.nav).to.equal(usdt(1_000n))
     await ctx.settlement.mint(await ctx.vault.getAddress(), usdt(1_000n))
-    await ctx.vault.processDepositEpoch(second, att, await signAttestation(ctx.harness, ctx.risk, att))
+    await ctx.vault.processDepositEpoch(second, att, ...(await attestationSignatures(ctx, att)))
     const epoch = await ctx.vault.epochs(second)
     expect(epoch.shares).to.equal(usdt(1_000n))
   })
@@ -206,7 +206,7 @@ describe('OperatorVault — deposits', function () {
     const vaultAddr = await ctx.vault.getAddress()
     await ctx.settlement.mint(vaultAddr, usdt(500n))
     await pullFromVault(ctx, ctx.settlement, ctx.lp2.address, usdt(200n))
-    await ctx.vault.processDepositEpoch(second, att, await signAttestation(ctx.harness, ctx.risk, att))
+    await ctx.vault.processDepositEpoch(second, att, ...(await attestationSignatures(ctx, att)))
     const epoch = await ctx.vault.epochs(second)
     expect(epoch.shares).to.equal(usdt(1_000n))
   })
@@ -223,7 +223,7 @@ describe('OperatorVault — deposits', function () {
     const att = await freshAttestation(ctx.vault, second, PRICE_1)
     await pullFromVault(ctx, ctx.settlement, ctx.lp2.address, usdt(100n))
     await expect(
-      ctx.vault.processDepositEpoch(second, att, await signAttestation(ctx.harness, ctx.risk, att))
+      ctx.vault.processDepositEpoch(second, att, ...(await attestationSignatures(ctx, att)))
     ).to.be.revertedWithCustomError(ctx.vault, 'InconsistentNav')
   })
 
@@ -243,9 +243,9 @@ describe('OperatorVault — deposits', function () {
     await ctx.vault.closeDepositEpoch(epochId)
     await ctx.vault.connect(ctx.guardian).pause()
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     await expect(
-      ctx.vault.processDepositEpoch(epochId, att, sig)
+      ctx.vault.processDepositEpoch(epochId, att, ...sigs)
     ).to.be.revertedWithCustomError(ctx.vault, 'EnforcedPause')
     await time.increase(DAY)
     await ctx.vault.voidDepositEpoch(epochId)

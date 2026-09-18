@@ -40,7 +40,7 @@ export function navAttestationDomain(vault: Address, chainId: bigint) {
   } as const
 }
 
-/** The digest the vault's riskSigner signs for `processDepositEpoch` et al. */
+/** The digest both vault signers sign for `processDepositEpoch` et al. */
 export function navAttestationDigest(attestation: NavAttestation): Hex {
   return hashTypedData({
     domain: navAttestationDomain(attestation.vault, attestation.chainId),

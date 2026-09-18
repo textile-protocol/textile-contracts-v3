@@ -4,7 +4,7 @@ import { expect } from 'chai'
 import { nav } from '../../../constants/src/operatorVaultMath'
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { closeAndProcessDeposit, closeRedeem, seedShares } from './helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
+import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 async function seededVault() {
   const ctx = await deployOperatorVault()
@@ -30,8 +30,8 @@ describe('OperatorVault — redemptions', function () {
     expect(await ctx.vault.closeOnly()).to.equal(true)
 
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await ctx.vault.settleRedeemEpoch(epochId, att, sig)
+    const sigs = await attestationSignatures(ctx, att)
+    await ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)
     expect(await ctx.vault.closeOnly()).to.equal(false)
 
     const before = await ctx.settlement.balanceOf(ctx.lp1.address)
@@ -60,8 +60,8 @@ describe('OperatorVault — redemptions', function () {
     )
 
     const att = await freshAttestation(ctx.vault, first, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await ctx.vault.settleRedeemEpoch(first, att, sig)
+    const sigs = await attestationSignatures(ctx, att)
+    await ctx.vault.settleRedeemEpoch(first, att, ...sigs)
     await expect(ctx.vault.closeRedeemEpoch(second)).to.be.revertedWithCustomError(
       ctx.vault,
       'CloseCooldownActive'
@@ -80,8 +80,8 @@ describe('OperatorVault — redemptions', function () {
     await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     await ctx.corridor.mint(await ctx.vault.getAddress(), extra)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.settleRedeemEpoch(epochId, att, sig))
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.settleRedeemEpoch(epochId, att, ...sigs))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(epochId, usdt(100n), usdt(100n), extra / 10n)
     const before = await ctx.corridor.balanceOf(ctx.lp1.address)
@@ -101,9 +101,9 @@ describe('OperatorVault — redemptions', function () {
     const extraC = 10n ** 18n
     await ctx.settlement.mint(await ctx.vault.getAddress(), extraS)
     await ctx.corridor.mint(await ctx.vault.getAddress(), extraC)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     await ctx.vault.connect(ctx.guardian).pause()
-    await ctx.vault.settleRedeemEpoch(epochId, att, sig)
+    await ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)
 
     const beforeS = await ctx.settlement.balanceOf(ctx.lp1.address)
     const beforeC = await ctx.corridor.balanceOf(ctx.lp1.address)
@@ -132,8 +132,8 @@ describe('OperatorVault — redemptions', function () {
     let epochId = await ctx.vault.currentRedeemEpochId()
     await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await ctx.vault.settleRedeemEpoch(epochId, att, sig)
+    const sigs = await attestationSignatures(ctx, att)
+    await ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)
     const marked = await ctx.vault.lastSettledNav()
     expect(marked).to.be.gt(await ctx.vault.freeSettlement())
 
@@ -141,8 +141,8 @@ describe('OperatorVault — redemptions', function () {
     epochId = await ctx.vault.currentRedeemEpochId()
     await closeRedeem(ctx, epochId)
     const second = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const secondSig = await signAttestation(ctx.harness, ctx.risk, second)
-    await ctx.vault.settleRedeemEpoch(epochId, second, secondSig)
+    const secondSigs = await attestationSignatures(ctx, second)
+    await ctx.vault.settleRedeemEpoch(epochId, second, ...secondSigs)
     const last = await ctx.vault.lastSettledNav()
     expect(last).to.equal(
       nav(
@@ -172,13 +172,13 @@ describe('OperatorVault — redemptions', function () {
     const epochId = await ctx.vault.currentRedeemEpochId()
     await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.settleRedeemEpoch(epochId, att, sig)).to.be.revertedWithCustomError(
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)).to.be.revertedWithCustomError(
       ctx.vault,
       'PauseRequired'
     )
     await ctx.vault.connect(ctx.guardian).pause()
-    await expect(ctx.vault.settleRedeemEpoch(epochId, att, sig))
+    await expect(ctx.vault.settleRedeemEpoch(epochId, att, ...sigs))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(epochId, usdt(1_000n), usdt(1_000n), 0n)
     await ctx.vault.connect(ctx.lp1).claim(epochId, ctx.lp1.address, ctx.lp1.address)
@@ -195,10 +195,10 @@ describe('OperatorVault — redemptions', function () {
     await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     await ctx.settlement.mint(await ctx.vault.getAddress(), usdt(50n))
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     // Half the supply takes half the attested floor; the 50 minted after the
     // snapshot stays with the remaining holders.
-    await expect(ctx.vault.settleRedeemEpoch(epochId, att, sig))
+    await expect(ctx.vault.settleRedeemEpoch(epochId, att, ...sigs))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(epochId, usdt(500n), usdt(500n), 0n)
     const before = await ctx.settlement.balanceOf(ctx.lp1.address)
@@ -214,11 +214,11 @@ describe('OperatorVault — redemptions', function () {
     await closeRedeem(ctx, epochId)
     await ctx.vault.connect(ctx.guardian).pause()
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     // ERC-1271 is dead once paused, so live is safe to use as the floor: a
     // tenth of the supply takes a tenth of the 1,050 actually in the vault.
     await ctx.settlement.mint(await ctx.vault.getAddress(), usdt(50n))
-    await expect(ctx.vault.settleRedeemEpoch(epochId, att, sig))
+    await expect(ctx.vault.settleRedeemEpoch(epochId, att, ...sigs))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(epochId, usdt(100n), usdt(105n), 0n)
     const before = await ctx.settlement.balanceOf(ctx.lp1.address)
@@ -239,7 +239,7 @@ describe('OperatorVault — redemptions', function () {
     await closeRedeem(ctx, epochId)
     const supply = await ctx.vault.totalSupply()
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     expect(att.freeSettlement).to.equal(usdt(2_000n))
     expect(att.freeCorridor).to.equal(inventoryC)
 
@@ -249,7 +249,7 @@ describe('OperatorVault — redemptions', function () {
     const lp2ValueBefore = (att.nav * lp2Shares) / supply
     const expectedS = (att.freeSettlement * shares) / supply
     const expectedC = (att.freeCorridor * shares) / supply
-    await expect(ctx.vault.settleRedeemEpoch(epochId, att, sig))
+    await expect(ctx.vault.settleRedeemEpoch(epochId, att, ...sigs))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(epochId, shares, expectedS, expectedC)
     expect(expectedS).to.equal(usdt(500n))
@@ -277,8 +277,8 @@ describe('OperatorVault — redemptions', function () {
     const epochId = await ctx.vault.currentRedeemEpochId()
     await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await ctx.vault.settleRedeemEpoch(epochId, att, sig)
+    const sigs = await attestationSignatures(ctx, att)
+    await ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)
     await ctx.vault.connect(ctx.lp1).claim(epochId, ctx.lp1.address, ctx.lp1.address)
     await ctx.vault.connect(ctx.lp2).claim(epochId, ctx.lp2.address, ctx.lp2.address)
     const epoch = await ctx.vault.epochs(epochId)

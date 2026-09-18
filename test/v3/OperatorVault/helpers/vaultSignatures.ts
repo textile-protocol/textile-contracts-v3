@@ -21,11 +21,20 @@ export interface Attestation {
 
 export async function signAttestation(
   harness: VaultLibHarness,
-  risk: Wallet,
+  signer: Wallet,
   att: Attestation
 ): Promise<string> {
   const digest = await harness.attestationDigest(att, att.vault, att.chainId)
-  return signDigest(risk, digest)
+  return signDigest(signer, digest)
+}
+
+/** Both signatures the vault takes, in its order: strategy, then risk. */
+export async function attestationSignatures(
+  ctx: { harness: VaultLibHarness; strategy: Wallet; risk: Wallet },
+  att: Attestation
+): Promise<[string, string]> {
+  const digest = await ctx.harness.attestationDigest(att, att.vault, att.chainId)
+  return [signDigest(ctx.strategy, digest), signDigest(ctx.risk, digest)]
 }
 
 export async function freshAttestation(

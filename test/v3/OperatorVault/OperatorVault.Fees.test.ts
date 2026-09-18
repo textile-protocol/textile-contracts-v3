@@ -15,7 +15,7 @@ import {
 } from './fixtures/operatorVault.fixture'
 import type { DeployedVault } from './fixtures/operatorVault.fixture'
 import { closeAndProcessDeposit, closeAndSettleRedeem, closeRedeem, seedShares } from './helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
+import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 describe('OperatorVault — management fee', function () {
   it('checkpoints the fee before a paused full-supply settle', async function () {
@@ -28,8 +28,8 @@ describe('OperatorVault — management fee', function () {
     await ctx.vault.connect(ctx.guardian).pause()
     await time.increase(365 * DAY)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await ctx.vault.settleRedeemEpoch(redeemId, att, sig)
+    const sigs = await attestationSignatures(ctx, att)
+    await ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)
 
     expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.be.gt(0)
   })
@@ -428,7 +428,7 @@ describe('OperatorVault — performance fee', function () {
       await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1n), ctx.lp1.address, ctx.lp1.address)
       const id = await closeRedeem(ctx, await ctx.vault.currentRedeemEpochId())
       const att = await freshAttestation(ctx.vault, id, PRICE_1)
-      return ctx.vault.settleRedeemEpoch(id, att, await signAttestation(ctx.harness, ctx.risk, att))
+      return ctx.vault.settleRedeemEpoch(id, att, ...(await attestationSignatures(ctx, att)))
     }
     await expect(settle()).to.emit(ctx.vault, 'HighWaterMarkUpdated')
     expect(await ctx.vault.highWaterMarkWad()).to.be.gt(WAD)
@@ -442,11 +442,11 @@ describe('OperatorVault — performance fee', function () {
     await ctx.vault.connect(ctx.lp1).requestRedeem(supply, ctx.lp1.address, ctx.lp1.address)
     const id = await closeRedeem(ctx, await ctx.vault.currentRedeemEpochId())
     const att = await freshAttestation(ctx.vault, id, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     // Signed at par; the gain arrives before settle. Paused pays live, so the
     // fee must see live too, or the last redeemer leaves with it untaxed.
     await gain(ctx, usdt(100_000n))
-    await ctx.vault.settleRedeemEpoch(id, att, sig)
+    await ctx.vault.settleRedeemEpoch(id, att, ...sigs)
 
     const total = math.performanceFeeShares(await ctx.vault.freeSettlement() + (await ctx.vault.reservedSettlement()), supply, WAD, PERF)
     const { operatorShares } = math.splitFee(total, PROTOCOL_FEE_SHARE_WAD)

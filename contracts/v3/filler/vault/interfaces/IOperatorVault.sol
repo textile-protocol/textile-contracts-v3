@@ -78,8 +78,12 @@ interface IOperatorVault {
 
   function closeDepositEpoch(uint256 epochId) external;
 
-  function processDepositEpoch(uint256 epochId, VaultLib.NavAttestation calldata attestation, bytes calldata signature)
-    external;
+  function processDepositEpoch(
+    uint256 epochId,
+    VaultLib.NavAttestation calldata attestation,
+    bytes calldata strategySignature,
+    bytes calldata riskSignature
+  ) external;
 
   function voidDepositEpoch(uint256 epochId) external;
 
@@ -91,15 +95,19 @@ interface IOperatorVault {
   ///         `redemptionCloseCooldown` has passed since the last settle.
   function closeRedeemEpoch(uint256 epochId) external;
 
-  /// @notice Settle a closed redeem epoch against a risk-signer attestation.
+  /// @notice Settle a closed redeem epoch against a dual-signed attestation.
   ///         Redeemers are paid both assets pro rata to their share of
   ///         supply, off the attested free balances, so the payout never
   ///         depends on the corridor price. A full-supply exit requires the
   ///         vault to be paused and pays live balances instead.
-  function settleRedeemEpoch(uint256 epochId, VaultLib.NavAttestation calldata attestation, bytes calldata signature)
-    external;
+  function settleRedeemEpoch(
+    uint256 epochId,
+    VaultLib.NavAttestation calldata attestation,
+    bytes calldata strategySignature,
+    bytes calldata riskSignature
+  ) external;
 
-  /// @notice Last-resort in-kind redeem when the risk signer cannot attest.
+  /// @notice Last-resort in-kind redeem when the signers cannot attest.
   ///         `emergencyExitTimeout` must have elapsed since the epoch closed.
   ///         Pauses the vault if the guardian has not already, then pays live
   ///         free balances, including unattested surplus. Anyone may call, so

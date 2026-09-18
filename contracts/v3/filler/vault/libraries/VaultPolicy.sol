@@ -520,12 +520,14 @@ library VaultPolicy {
     return true;
   }
 
+  /// @notice Dual-signed like an order: the attested figures are what the
+  ///         vault converts at, so one key alone must not set them.
   function verifyAttestation(
     VaultLib.NavAttestation calldata att,
-    bytes calldata signature,
+    bytes calldata strategySignature,
+    bytes calldata riskSignature,
     uint256 epochId,
-    address vault,
-    address riskSigner
+    address vault
   ) external view returns (uint256 price) {
     if (att.vault != vault || att.chainId != block.chainid || att.epochId != epochId) {
       revert VaultErrors.InvalidAttestation();
@@ -533,7 +535,11 @@ library VaultPolicy {
     if (block.timestamp < att.validAfter || block.timestamp > att.validUntil) revert VaultErrors.InvalidAttestation();
     if (att.corridorAssetPrice == 0) revert VaultErrors.InvalidAttestation();
     bytes32 digest = VaultLib.attestationDigest(att, vault, block.chainid);
-    if (!VaultLib.isSigner(riskSigner, digest, signature)) revert VaultErrors.InvalidAttestation();
+    IVaultSignatureSource src = IVaultSignatureSource(vault);
+    if (
+      !VaultLib.isSigner(src.strategySigner(), digest, strategySignature)
+        || !VaultLib.isSigner(src.riskSigner(), digest, riskSignature)
+    ) revert VaultErrors.InvalidAttestation();
     return att.corridorAssetPrice;
   }
 

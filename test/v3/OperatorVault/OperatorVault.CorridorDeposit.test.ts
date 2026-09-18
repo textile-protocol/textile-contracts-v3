@@ -14,7 +14,7 @@ import {
   pullFromVault,
   seedShares,
 } from './helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
+import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 /** 0.0006 USDT per cNGN, WAD-scaled. cngn(1_000_000) is worth usdt(600). */
 const PRICE_CNGN = 6n * 10n ** 14n
@@ -155,7 +155,7 @@ describe('OperatorVault — corridor deposits', function () {
     await ctx.vault.processDepositEpoch(
       corridorId,
       att,
-      await signAttestation(ctx.harness, ctx.risk, att)
+      ...(await attestationSignatures(ctx, att))
     )
 
     await ctx.vault
@@ -211,7 +211,7 @@ describe('OperatorVault — corridor deposits', function () {
       ctx.vault.settleRedeemEpoch(
         redeemId,
         att,
-        await signAttestation(ctx.harness, ctx.risk, att)
+        ...(await attestationSignatures(ctx, att))
       )
     )
       .to.emit(ctx.vault, 'RedeemEpochSettled')
@@ -232,7 +232,7 @@ describe('OperatorVault — corridor deposits', function () {
     await ctx.vault.processDepositEpoch(
       corridorId,
       depositAtt,
-      await signAttestation(ctx.harness, ctx.risk, depositAtt)
+      ...(await attestationSignatures(ctx, depositAtt))
     )
     await ctx.vault
       .connect(ctx.lp2)
@@ -348,16 +348,16 @@ describe('OperatorVault — corridor deposits', function () {
     await time.increase(DAY)
     await ctx.vault.closeDepositEpoch(second)
     const att = await freshAttestation(ctx.vault, second, PRICE_CNGN)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
 
     await pullFromVault(ctx, ctx.corridor, ctx.lp2.address, cngn(1n))
     await expect(
-      ctx.vault.processDepositEpoch(second, att, sig)
+      ctx.vault.processDepositEpoch(second, att, ...sigs)
     ).to.be.revertedWithCustomError(ctx.vault, 'InconsistentNav')
 
     // A donation above the floor is fine, and the epoch still mints against the signed NAV.
     await ctx.corridor.mint(await ctx.vault.getAddress(), cngn(10n))
-    await ctx.vault.processDepositEpoch(second, att, sig)
+    await ctx.vault.processDepositEpoch(second, att, ...sigs)
     expect((await ctx.vault.epochs(second)).shares).to.equal(usdt(600n))
   })
 
@@ -374,7 +374,7 @@ describe('OperatorVault — corridor deposits', function () {
       ctx.vault.processDepositEpoch(
         id,
         att,
-        await signAttestation(ctx.harness, ctx.risk, att)
+        ...(await attestationSignatures(ctx, att))
       )
     ).to.be.revertedWithCustomError(ctx.vault, 'ZeroAmount')
     await time.increase(DAY)
@@ -406,7 +406,7 @@ describe('OperatorVault — corridor deposits', function () {
       ctx.vault.settleRedeemEpoch(
         redeemId,
         live,
-        await signAttestation(ctx.harness, ctx.risk, live)
+        ...(await attestationSignatures(ctx, live))
       )
     ).to.be.revertedWithCustomError(ctx.vault, 'PauseRequired')
 
@@ -416,7 +416,7 @@ describe('OperatorVault — corridor deposits', function () {
       ctx.vault.settleRedeemEpoch(
         redeemId,
         att,
-        await signAttestation(ctx.harness, ctx.risk, att)
+        ...(await attestationSignatures(ctx, att))
       )
     )
       .to.emit(ctx.vault, 'RedeemEpochSettled')

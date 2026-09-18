@@ -4,7 +4,7 @@ import { ethers } from 'hardhat'
 
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { closeAndProcessDeposit, closeRedeem, seedShares } from './helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
+import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 describe('OperatorVault — remaining edges', function () {
   it('opens a fresh deposit epoch once the current one is past cutoff', async function () {
@@ -32,8 +32,8 @@ describe('OperatorVault — remaining edges', function () {
     await time.increase(DAY)
     await ctx.vault.closeDepositEpoch(epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await ctx.vault.processDepositEpoch(epochId, att, sig)
+    const sigs = await attestationSignatures(ctx, att)
+    await ctx.vault.processDepositEpoch(epochId, att, ...sigs)
     expect((await ctx.vault.epochs(epochId)).state).to.equal(3) // Processed
   })
 
@@ -55,8 +55,8 @@ describe('OperatorVault — remaining edges', function () {
 
     await closeRedeem(ctx, redeemId)
     const ratt = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-    const rsig = await signAttestation(ctx.harness, ctx.risk, ratt)
-    await ctx.vault.settleRedeemEpoch(redeemId, ratt, rsig)
+    const rsigs = await attestationSignatures(ctx, ratt)
+    await ctx.vault.settleRedeemEpoch(redeemId, ratt, ...rsigs)
     expect(await ctx.vault.requestUnits(ctx.lp1.address, redeemId)).to.equal(usdt(200n))
     expect((await ctx.vault.epochs(redeemId)).state).to.equal(5) // Settled: claimable
   })
@@ -107,8 +107,8 @@ describe('OperatorVault — remaining edges', function () {
       'EpochNotReady'
     )
     const att = await freshAttestation(ctx.vault, depositId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.processDepositEpoch(depositId, att, sig)).to.be.revertedWithCustomError(
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.processDepositEpoch(depositId, att, ...sigs)).to.be.revertedWithCustomError(
       ctx.vault,
       'EpochNotClosed'
     )
@@ -131,7 +131,7 @@ describe('OperatorVault — remaining edges', function () {
       ctx.vault,
       'EpochNotOpen'
     )
-    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.revertedWithCustomError(
+    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)).to.be.revertedWithCustomError(
       ctx.vault,
       'EpochNotClosed'
     )
@@ -146,13 +146,13 @@ describe('OperatorVault — remaining edges', function () {
     const redeemId = await ctx.vault.currentRedeemEpochId()
     await closeRedeem(ctx, redeemId)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.revertedWithCustomError(
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)).to.be.revertedWithCustomError(
       ctx.vault,
       'PauseRequired'
     )
     await ctx.vault.connect(ctx.guardian).pause()
-    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig))
+    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(redeemId, usdt(1_000n), usdt(1_000n), corridorHeld)
     const before = await ctx.corridor.balanceOf(ctx.lp1.address)
@@ -173,8 +173,8 @@ describe('OperatorVault — remaining edges', function () {
     const redeemId = await ctx.vault.currentRedeemEpochId()
     await closeRedeem(ctx, redeemId)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig))
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs))
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(redeemId, usdt(600n), usdt(600n), (corridorHeld * 6n) / 10n)
     const beforeS = await ctx.settlement.balanceOf(ctx.lp1.address)
@@ -195,8 +195,8 @@ describe('OperatorVault — remaining edges', function () {
     await time.increase(DAY)
     await ctx.vault.closeDepositEpoch(epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.processDepositEpoch(epochId, att, sig)).to.be.revertedWithCustomError(
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.processDepositEpoch(epochId, att, ...sigs)).to.be.revertedWithCustomError(
       ctx.vault,
       'ZeroAmount'
     )

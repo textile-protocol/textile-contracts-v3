@@ -144,8 +144,12 @@ export function markAfter(
   return pps > markWad ? pps : markWad
 }
 
-/** Mirrors OperatorVaultFactory.VERSION: the VaultInit layout the admin form and deploy script encode. */
-export const OPERATOR_VAULT_FACTORY_VERSION = 2
+/**
+ * Mirrors OperatorVaultFactory.VERSION: the VaultInit layout the admin form and
+ * deploy script encode, and the vault ABI the keeper drives. 3 is the first
+ * whose epochs settle only against a dual-signed attestation.
+ */
+export const OPERATOR_VAULT_FACTORY_VERSION = 3
 
 export function tradingNonce(epoch: bigint, counter: bigint): bigint {
   return (epoch << EPOCH_NONCE_SHIFT) | counter

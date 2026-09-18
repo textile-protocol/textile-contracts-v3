@@ -5,44 +5,55 @@ import { ethers } from 'hardhat'
 import * as math from '../../../constants/src/operatorVaultMath'
 
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
-import { encodeValidationData, freshAttestation, signAttestation } from './helpers/vaultSignatures'
+import {
+  attestationSignatures,
+  encodeValidationData,
+  freshAttestation,
+  signAttestation,
+} from './helpers/vaultSignatures'
 
 describe('VaultPolicy', function () {
   it('rejects a zero-price or expired attestation', async function () {
     const ctx = await deployOperatorVault()
+    const vaultAddr = await ctx.vault.getAddress()
     const att = await freshAttestation(ctx.vault, 1n, 0n)
-    const sig = await signAttestation(ctx.harness, ctx.risk, { ...att, corridorAssetPrice: PRICE_1 })
-    await expect(
-      ctx.harness.verifyAttestation(att, sig, 1n, await ctx.vault.getAddress(), ctx.risk.address)
-    ).to.be.reverted
+    const sigs = await attestationSignatures(ctx, { ...att, corridorAssetPrice: PRICE_1 })
+    await expect(ctx.harness.verifyAttestation(att, ...sigs, 1n, vaultAddr)).to.be.reverted
 
     const expired = await freshAttestation(ctx.vault, 1n, PRICE_1)
     expired.validUntil = expired.validAfter
-    const expiredSig = await signAttestation(ctx.harness, ctx.risk, expired)
-    await expect(
-      ctx.harness.verifyAttestation(
-        expired,
-        expiredSig,
-        1n,
-        await ctx.vault.getAddress(),
-        ctx.risk.address
-      )
-    ).to.be.reverted
+    const expiredSigs = await attestationSignatures(ctx, expired)
+    await expect(ctx.harness.verifyAttestation(expired, ...expiredSigs, 1n, vaultAddr)).to.be
+      .reverted
   })
 
   it('accepts a well-formed attestation', async function () {
     const ctx = await deployOperatorVault()
     const att = await freshAttestation(ctx.vault, 1n, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
     expect(
-      await ctx.harness.verifyAttestation(
-        att,
-        sig,
-        1n,
-        await ctx.vault.getAddress(),
-        ctx.risk.address
-      )
+      await ctx.harness.verifyAttestation(att, ...sigs, 1n, await ctx.vault.getAddress())
     ).to.equal(PRICE_1)
+  })
+
+  it('needs both signatures: either key alone is refused', async function () {
+    const ctx = await deployOperatorVault()
+    const vaultAddr = await ctx.vault.getAddress()
+    const att = await freshAttestation(ctx.vault, 1n, PRICE_1)
+    const [strategySig, riskSig] = await attestationSignatures(ctx, att)
+    const verify = (s: string, r: string) => ctx.harness.verifyAttestation(att, s, r, 1n, vaultAddr)
+    const refused = (s: string, r: string) =>
+      expect(verify(s, r)).to.be.revertedWithCustomError(ctx.vault, 'InvalidAttestation')
+
+    // One key in both slots, and the two swapped.
+    await refused(riskSig, riskSig)
+    await refused(strategySig, strategySig)
+    await refused(riskSig, strategySig)
+    // A stranger in either slot.
+    const otherSig = await signAttestation(ctx.harness, ethers.Wallet.createRandom(), att)
+    await refused(otherSig, riskSig)
+    await refused(strategySig, otherSig)
+    expect(await verify(strategySig, riskSig)).to.equal(PRICE_1)
   })
 
   it('rejects orders that fail policy checks', async function () {
@@ -197,26 +208,19 @@ describe('VaultPolicy', function () {
     const ctx = await deployOperatorVault()
     const vaultAddr = await ctx.vault.getAddress()
     const att = await freshAttestation(ctx.vault, 1n, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
+    const sigs = await attestationSignatures(ctx, att)
 
-    await expect(ctx.harness.verifyAttestation(att, sig, 2n, vaultAddr, ctx.risk.address)).to.be
-      .reverted
-    await expect(ctx.harness.verifyAttestation(att, sig, 1n, ctx.other.address, ctx.risk.address)).to
-      .be.reverted
-    await expect(ctx.harness.verifyAttestation(att, sig, 1n, vaultAddr, ctx.strategy.address)).to.be
-      .reverted
+    await expect(ctx.harness.verifyAttestation(att, ...sigs, 2n, vaultAddr)).to.be.reverted
+    await expect(ctx.harness.verifyAttestation(att, ...sigs, 1n, ctx.other.address)).to.be.reverted
 
     const future = { ...att, validAfter: att.validUntil }
-    const futureSig = await signAttestation(ctx.harness, ctx.risk, future)
-    await expect(
-      ctx.harness.verifyAttestation(future, futureSig, 1n, vaultAddr, ctx.risk.address)
-    ).to.be.reverted
+    const futureSigs = await attestationSignatures(ctx, future)
+    await expect(ctx.harness.verifyAttestation(future, ...futureSigs, 1n, vaultAddr)).to.be.reverted
 
     const wrongChain = { ...att, chainId: att.chainId + 1n }
-    const wrongChainSig = await signAttestation(ctx.harness, ctx.risk, wrongChain)
-    await expect(
-      ctx.harness.verifyAttestation(wrongChain, wrongChainSig, 1n, vaultAddr, ctx.risk.address)
-    ).to.be.reverted
+    const wrongChainSigs = await attestationSignatures(ctx, wrongChain)
+    await expect(ctx.harness.verifyAttestation(wrongChain, ...wrongChainSigs, 1n, vaultAddr)).to.be
+      .reverted
   })
 
   it('rejects a config with a zero duration, size, or version', async function () {

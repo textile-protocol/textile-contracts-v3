@@ -297,7 +297,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   function processDepositEpoch(
     uint256 epochId,
     VaultLib.NavAttestation calldata attestation,
-    bytes calldata signature
+    bytes calldata strategySignature,
+    bytes calldata riskSignature
   ) external override nonReentrant {
     if (paused) revert VaultErrors.EnforcedPause();
     Epoch storage epoch = _closedEpoch(epochId, true);
@@ -311,9 +312,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
       return;
     }
 
-    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
     // NAV before the checkpoint, supply after: this epoch converts at the post-fee price.
-    (uint256 conversionNav,,,) = _requireLiveNav(attestation, price);
+    (uint256 price, uint256 conversionNav,,,) =
+      _verifiedLiveNav(epochId, attestation, strategySignature, riskSignature);
     _checkpointFee(conversionNav);
 
     uint256 supply = totalSupply();
@@ -416,13 +417,13 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   function settleRedeemEpoch(
     uint256 epochId,
     VaultLib.NavAttestation calldata attestation,
-    bytes calldata signature
+    bytes calldata strategySignature,
+    bytes calldata riskSignature
   ) external override nonReentrant {
     Epoch storage epoch = _closedEpoch(epochId, false);
     _recallAll();
-    uint256 price = VaultPolicy.verifyAttestation(attestation, signature, epochId, address(this), _roles.riskSigner);
-    (uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC) =
-      _requireLiveNav(attestation, price);
+    (uint256 price, uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC) =
+      _verifiedLiveNav(epochId, attestation, strategySignature, riskSignature);
     // Paused pays live balances (below), so the fee is charged on live NAV too.
     bool isPaused = paused;
     _checkpointFee(isPaused ? liveNav : conversionNav);
@@ -1040,7 +1041,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     return VaultLib.nav(_freeSettlement(), _freeCorridor(), priceWad, settlementDecimals, corridorDecimals);
   }
 
-  /// @notice Attestations bind `lastSettledNav` so a prior epoch cannot be
+  /// @notice Verifies the attestation, then checks it against live state.
+  ///         One function for both epoch paths, which keeps the vault under
+  ///         the bytecode cap.
+  ///         Attestations bind `lastSettledNav` so a prior epoch cannot be
   ///         replayed after settlement. Live free balances and live NAV must
   ///         be at least the signed snapshot: a UniswapX input pull that eats
   ///         attested inventory reverts. Surplus (donations, completed fills)
@@ -1050,11 +1054,17 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ///         Surplus is marked in afterwards via `_recordSettledNav`. A
   ///         bootstrap deposit epoch ignores the signed NAV altogether: see
   ///         `processDepositEpoch`.
-  function _requireLiveNav(VaultLib.NavAttestation calldata att, uint256 priceWad)
+  function _verifiedLiveNav(
+    uint256 epochId,
+    VaultLib.NavAttestation calldata att,
+    bytes calldata strategySignature,
+    bytes calldata riskSignature
+  )
     private
     view
-    returns (uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC)
+    returns (uint256 priceWad, uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC)
   {
+    priceWad = VaultPolicy.verifyAttestation(att, strategySignature, riskSignature, epochId, address(this));
     if (att.lastSettledNav != lastSettledNav) revert VaultErrors.InvalidAttestation();
     freeS = _freeSettlement();
     freeC = _freeCorridor();

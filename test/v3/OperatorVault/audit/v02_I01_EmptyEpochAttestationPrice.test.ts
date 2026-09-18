@@ -17,7 +17,7 @@ import {
   usdt,
 } from '../fixtures/operatorVault.fixture'
 import type { DeployedVault } from '../fixtures/operatorVault.fixture'
-import { freshAttestation, signAttestation } from '../helpers/vaultSignatures'
+import { attestationSignatures, freshAttestation } from '../helpers/vaultSignatures'
 
 const ABSURD_PRICE = PRICE_1 * 1_000_000n
 
@@ -39,7 +39,7 @@ describe('AUDIT I-01 — an empty deposit epoch reports no price', function () {
 
     const att = await freshAttestation(ctx.vault, epochId, ABSURD_PRICE)
     await expect(
-      ctx.vault.connect(ctx.other).processDepositEpoch(epochId, att, '0x')
+      ctx.vault.connect(ctx.other).processDepositEpoch(epochId, att, '0x', '0x')
     )
       .to.emit(ctx.vault, 'DepositEpochProcessed')
       .withArgs(epochId, 0, 0, 0)
@@ -54,8 +54,8 @@ describe('AUDIT I-01 — an empty deposit epoch reports no price', function () {
     const epochId = await emptyClosedEpoch(ctx)
 
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(ctx.vault.processDepositEpoch(epochId, att, sig))
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.processDepositEpoch(epochId, att, ...sigs))
       .to.emit(ctx.vault, 'DepositEpochProcessed')
       .withArgs(epochId, 0, 0, 0)
   })
@@ -71,8 +71,8 @@ describe('AUDIT I-01 — an empty deposit epoch reports no price', function () {
     await vault.closeDepositEpoch(epochId)
 
     const att = await freshAttestation(vault, epochId, PRICE_1)
-    const sig = await signAttestation(ctx.harness, ctx.risk, att)
-    await expect(vault.processDepositEpoch(epochId, att, sig))
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(vault.processDepositEpoch(epochId, att, ...sigs))
       .to.emit(vault, 'DepositEpochProcessed')
       .withArgs(epochId, usdt(100n), usdt(100n), PRICE_1)
   })

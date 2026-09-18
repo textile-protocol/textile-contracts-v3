@@ -4,7 +4,7 @@ import { ethers } from 'hardhat'
 
 import { ERC1271_FAIL, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { closeAndSettleRedeem, closeRedeem, seedShares } from './helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
+import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 describe('OperatorVault — recovery', function () {
   describe('sweepToken', function () {
@@ -137,8 +137,8 @@ describe('OperatorVault — recovery', function () {
       att.freeSettlement = 0n
       att.freeCorridor = 0n
       att.nav = 0n
-      const sig = await signAttestation(ctx.harness, ctx.risk, att)
-      await ctx.vault.settleRedeemEpoch(epochId, att, sig)
+      const sigs = await attestationSignatures(ctx, att)
+      await ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)
 
       const before = await ctx.settlement.balanceOf(ctx.lp1.address)
       await ctx.vault.connect(ctx.lp1).claim(epochId, ctx.lp1.address, ctx.lp1.address)

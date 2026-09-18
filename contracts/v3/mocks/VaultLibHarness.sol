@@ -119,11 +119,11 @@ contract VaultLibHarness {
 
   function verifyAttestation(
     VaultLib.NavAttestation calldata att,
-    bytes calldata signature,
+    bytes calldata strategySignature,
+    bytes calldata riskSignature,
     uint256 epochId,
-    address vault,
-    address riskSigner
+    address vault
   ) external view returns (uint256) {
-    return VaultPolicy.verifyAttestation(att, signature, epochId, vault, riskSigner);
+    return VaultPolicy.verifyAttestation(att, strategySignature, riskSignature, epochId, vault);
   }
 }

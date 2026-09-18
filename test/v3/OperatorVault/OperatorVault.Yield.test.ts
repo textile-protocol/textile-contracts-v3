@@ -20,7 +20,7 @@ import { closeRedeem, seedShares } from './helpers/vaultLifecycle'
 import {
   defaultOrder,
   freshAttestation,
-  signAttestation,
+  attestationSignatures,
   signVaultEnvelope,
 } from './helpers/vaultSignatures'
 
@@ -126,8 +126,8 @@ describe('OperatorVault — idle yield', function () {
       await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(2_000n), ctx.lp1.address, ctx.lp1.address)
       const redeemId = await closeRedeem(ctx)
       const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-      const sig = await signAttestation(ctx.harness, ctx.risk, att)
-      await ctx.vault.settleRedeemEpoch(redeemId, att, sig)
+      const sigs = await attestationSignatures(ctx, att)
+      await ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)
       expect(await ctx.vault.reservedSettlement()).to.equal(usdt(2_000n))
 
       await ctx.vault.allocateIdle()
@@ -370,9 +370,9 @@ describe('OperatorVault — idle yield', function () {
       await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(2_000n), ctx.lp1.address, ctx.lp1.address)
       const redeemId = await closeRedeem(ctx)
       const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-      const sig = await signAttestation(ctx.harness, ctx.risk, att)
+      const sigs = await attestationSignatures(ctx, att)
 
-      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig))
+      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs))
         .to.emit(ctx.vault, 'IdleRecalled')
         .withArgs(usdt(10_000n))
       expect(await ctx.adapter.held()).to.equal(0n)
@@ -392,8 +392,8 @@ describe('OperatorVault — idle yield', function () {
       await ctx.vault.connect(ctx.guardian).pause()
 
       const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-      const sig = await signAttestation(ctx.harness, ctx.risk, att)
-      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.emit(ctx.vault, 'IdleRecalled')
+      const sigs = await attestationSignatures(ctx, att)
+      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)).to.emit(ctx.vault, 'IdleRecalled')
       expect(await ctx.adapter.held()).to.equal(0n)
     })
 
@@ -406,8 +406,8 @@ describe('OperatorVault — idle yield', function () {
 
       await ctx.aavePool.setWithdrawReverts(true)
       const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-      const sig = await signAttestation(ctx.harness, ctx.risk, att)
-      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.reverted
+      const sigs = await attestationSignatures(ctx, att)
+      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)).to.be.reverted
 
       // Guardian pause never touches Aave.
       await expect(ctx.vault.connect(ctx.guardian).pause()).to.emit(ctx.vault, 'Paused')
@@ -458,10 +458,10 @@ describe('OperatorVault — idle yield', function () {
 
       // Attestation snapshot, then more interest lands before processing.
       const att = await freshAttestation(ctx.vault, depositId, PRICE_1)
-      const sig = await signAttestation(ctx.harness, ctx.risk, att)
+      const sigs = await attestationSignatures(ctx, att)
       await accrueAaveInterest(ctx, (RAY * 101n) / 100n)
 
-      await expect(ctx.vault.processDepositEpoch(depositId, att, sig)).to.emit(
+      await expect(ctx.vault.processDepositEpoch(depositId, att, ...sigs)).to.emit(
         ctx.vault,
         'DepositEpochProcessed'
       )

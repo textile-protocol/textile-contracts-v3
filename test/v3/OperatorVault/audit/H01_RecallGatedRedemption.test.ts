@@ -29,7 +29,7 @@ import {
   usdt,
 } from '../fixtures/operatorVault.fixture'
 import { armEmergencyExit, closeRedeem, seedShares } from '../helpers/vaultLifecycle'
-import { freshAttestation, signAttestation } from '../helpers/vaultSignatures'
+import { freshAttestation, attestationSignatures } from '../helpers/vaultSignatures'
 
 /** 10k supplied to Aave, 2k of shares queued for redemption and closed. */
 async function strandedVault(overrides: VaultInitOverrides = {}) {
@@ -52,8 +52,8 @@ describe('AUDIT H-01 — emergency exit survives an impaired Aave recall', funct
     await time.increase(await ctx.vault.emergencyExitTimeout())
     {
       const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
-      const sig = await signAttestation(ctx.harness, ctx.risk, att)
-      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.reverted
+      const sigs = await attestationSignatures(ctx, att)
+      await expect(ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)).to.be.reverted
     }
 
     // The last-resort exit no longer waits for Aave: it settles the epoch's
