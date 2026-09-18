@@ -105,7 +105,7 @@ library VaultPolicy {
     corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
   }
 
-  /// @notice One checkpoint, both fee legs, split with the protocol. One call: the vault has no bytecode for two.
+  /// @notice One checkpoint, both fee legs, each split with the protocol on its own terms. One call: the vault has no bytecode for two.
   /// @param navAssets Attested NAV, never a live read; zero skips the performance leg.
   function checkpointAccrual(
     uint256 supply,
@@ -120,17 +120,21 @@ library VaultPolicy {
     returns (uint256 operatorShares, uint256 protocolShares, address protocolRecipient, uint256 newMarkWad)
   {
     // Performance is charged net of the management leg.
-    uint256 shares = VaultLib.feeShares(supply, managementFeeWad, elapsed);
+    uint256 mgmt = VaultLib.feeShares(supply, managementFeeWad, elapsed);
     newMarkWad = supply == 0 ? VaultLib.WAD : markWad;
+    uint256 perf;
     if (navAssets != 0) {
-      uint256 perf = VaultLib.performanceFeeShares(navAssets, supply + shares, newMarkWad, performanceFeeWad);
-      newMarkWad = VaultLib.markAfter(navAssets, supply + shares + perf, newMarkWad);
-      shares += perf;
+      perf = VaultLib.performanceFeeShares(navAssets, supply + mgmt, newMarkWad, performanceFeeWad);
+      newMarkWad = VaultLib.markAfter(navAssets, supply + mgmt + perf, newMarkWad);
     }
-    if (shares == 0) return (0, 0, address(0), newMarkWad);
-    uint256 shareWad;
-    (protocolRecipient, shareWad) = _factory().protocolFee();
-    (operatorShares, protocolShares) = VaultLib.splitFee(shares, shareWad);
+    if (mgmt + perf == 0) return (0, 0, address(0), newMarkWad);
+    uint256 mgmtShareWad;
+    uint256 perfShareWad;
+    (protocolRecipient, mgmtShareWad, perfShareWad) = _factory().protocolFeeFor(address(this));
+    (uint256 mgmtOperator, uint256 mgmtProtocol) = VaultLib.splitFee(mgmt, mgmtShareWad);
+    (uint256 perfOperator, uint256 perfProtocol) = VaultLib.splitFee(perf, perfShareWad);
+    operatorShares = mgmtOperator + perfOperator;
+    protocolShares = mgmtProtocol + perfProtocol;
   }
 
   /// @dev Runs under delegatecall, so `address(this)` is the vault and its

@@ -24,8 +24,8 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   uint256 public constant VERSION = 2;
   uint256 public constant MAX_NAME_BYTES = 64;
   uint256 public constant MAX_SYMBOL_BYTES = 16;
-  /// @notice The protocol may take at most half of an operator's fee. A
-  ///         fat-fingered deploy cannot mint a factory that takes it all.
+  /// @notice The protocol may take at most half of either fee leg. A
+  ///         fat-fingered deploy cannot mint a vault that hands it all over.
   uint256 public constant MAX_PROTOCOL_FEE_SHARE_WAD = 5e17;
 
   address public immutable reactor;
@@ -34,12 +34,18 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   /// @notice Yield adapter implementation cloned per vault. Zero = this
   ///         factory cannot enable idle yield.
   address public immutable yieldAdapterImplementation;
-  /// @notice Protocol cut of every vault's fee accruals, baked into each
-  ///         vault at deploy. Immutable here too: changing either means a
-  ///         new factory, exactly like a SellFirstFeeController rotation, so
-  ///         no key can redirect fees on a live vault.
+  /// @notice Where Textile's cut of every vault's fee accruals is minted.
+  ///         Immutable, exactly like a SellFirstFeeController rotation, so no
+  ///         key can redirect fees on a live vault.
   address public immutable override protocolFeeRecipient;
-  uint256 public immutable override protocolFeeShareWad;
+
+  /// @notice Textile's cut of each fee leg, set per vault at deploy and never
+  ///         changed. The vault reads it back at every checkpoint.
+  struct ProtocolTerms {
+    uint128 managementShareWad;
+    uint128 performanceShareWad;
+  }
+  mapping(address => ProtocolTerms) private _protocolTerms;
 
   /// @dev Vaults per (operatorAdmin, settlement, corridor, VERSION), oldest
   ///      first. Append-only apart from `rekeyOperator`, which moves a single
@@ -57,6 +63,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     string name,
     string symbol
   );
+  event ProtocolTermsSet(address indexed vault, uint256 managementShareWad, uint256 performanceShareWad);
   event VaultRekeyed(
     address indexed vault,
     address indexed previousAdmin,
@@ -70,25 +77,27 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     address permit2_,
     address preferredFillerValidation_,
     address yieldAdapterImplementation_,
-    address protocolFeeRecipient_,
-    uint256 protocolFeeShareWad_
+    address protocolFeeRecipient_
   ) {
     if (
       reactor_ == address(0) || permit2_ == address(0) || preferredFillerValidation_ == address(0)
         || protocolFeeRecipient_ == address(0)
     ) revert VaultErrors.ZeroAddress();
-    if (protocolFeeShareWad_ > MAX_PROTOCOL_FEE_SHARE_WAD) revert VaultErrors.InvalidParams();
     reactor = reactor_;
     permit2 = permit2_;
     preferredFillerValidation = preferredFillerValidation_;
     yieldAdapterImplementation = yieldAdapterImplementation_;
     protocolFeeRecipient = protocolFeeRecipient_;
-    protocolFeeShareWad = protocolFeeShareWad_;
   }
 
   /// @inheritdoc IOperatorVaultFactory
-  function protocolFee() external view returns (address recipient, uint256 shareWad) {
-    return (protocolFeeRecipient, protocolFeeShareWad);
+  function protocolFeeFor(address vault)
+    external
+    view
+    returns (address recipient, uint256 managementShareWad, uint256 performanceShareWad)
+  {
+    ProtocolTerms storage terms = _protocolTerms[vault];
+    return (protocolFeeRecipient, terms.managementShareWad, terms.performanceShareWad);
   }
 
   /// @inheritdoc IOperatorVaultFactory
@@ -96,6 +105,10 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     if (msg.sender != init.operatorAdmin) revert VaultErrors.NotAuthorized();
     _requireLabel(init.name, MAX_NAME_BYTES);
     _requireLabel(init.symbol, MAX_SYMBOL_BYTES);
+    if (
+      init.protocolManagementShareWad > MAX_PROTOCOL_FEE_SHARE_WAD
+        || init.protocolPerformanceShareWad > MAX_PROTOCOL_FEE_SHARE_WAD
+    ) revert VaultErrors.InvalidParams();
     bytes32 key = _key(init.operatorAdmin, address(init.settlementAsset), address(init.corridorAsset));
 
     address adapter;
@@ -145,6 +158,10 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     }
     _vaultsOf[key].push(vault);
     isVault[vault] = true;
+    // Both fit uint128: capped at 5e17 above.
+    _protocolTerms[vault] = ProtocolTerms(
+      uint128(init.protocolManagementShareWad), uint128(init.protocolPerformanceShareWad)
+    );
 
     emit VaultDeployed(
       vault,
@@ -156,6 +173,9 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       init.name,
       init.symbol
     );
+    // After VaultDeployed: the subgraph creates the vault on that event and
+    // fills the terms in on this one.
+    emit ProtocolTermsSet(vault, init.protocolManagementShareWad, init.protocolPerformanceShareWad);
   }
 
   /// @inheritdoc IOperatorVaultFactory

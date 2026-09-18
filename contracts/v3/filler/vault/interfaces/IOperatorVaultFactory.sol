@@ -12,13 +12,15 @@ interface IOperatorVaultFactory {
 
   function isVault(address vault) external view returns (bool);
 
-  /// @notice Protocol cut of every fee accrual, management and performance
-  ///         alike, in every vault this factory deploys: where it is minted, and the WAD fraction of the
-  ///         accrual it takes. Immutable — a new cut means a new factory.
+  /// @notice Where Textile's cut of every vault's fee accruals is minted.
+  ///         Immutable — a new recipient means a new factory.
   function protocolFeeRecipient() external view returns (address);
-  function protocolFeeShareWad() external view returns (uint256);
-  /// @notice Both of the above in one read; what the vaults call at checkpoint.
-  function protocolFee() external view returns (address recipient, uint256 shareWad);
+  /// @notice The recipient plus `vault`'s own cut of each fee leg (WAD),
+  ///         fixed at deploy. What the vault calls at checkpoint.
+  function protocolFeeFor(address vault)
+    external
+    view
+    returns (address recipient, uint256 managementShareWad, uint256 performanceShareWad);
 
   /// @notice The most recently indexed vault for the tuple, or zero when the
   ///         operator has none. An operator may hold several — this is the

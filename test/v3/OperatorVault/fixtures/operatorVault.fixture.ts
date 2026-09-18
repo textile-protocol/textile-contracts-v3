@@ -23,6 +23,7 @@ export const ERC1271_FAIL = '0xffffffff'
 export { CANONICAL_PERMIT2 }
 
 /** The cut Textile's factories are deployed with — the deploy script's own constant. */
+/** The per-vault Textile cut every fixture vault starts with, on both legs. */
 export const PROTOCOL_FEE_SHARE_WAD = OPERATOR_VAULT_PROTOCOL_FEE_SHARE_WAD
 export const usdt = (n: bigint) => n * 10n ** 6n
 export const cngn = (n: bigint) => n * 10n ** 18n
@@ -90,7 +91,8 @@ export interface VaultInitOverrides {
   minLiquidSettlement?: bigint
   /** Factory-level protocol cut of the management fee, WAD. Defaults to the
    *  10% Textile deploys with. 0n deploys a factory that takes nothing. */
-  protocolFeeShareWad?: bigint
+  protocolManagementShareWad?: bigint
+  protocolPerformanceShareWad?: bigint
   /** Etch the real Permit2 and deploy the vendored LimitOrderReactor +
    *  PreferredFillerValidation instead of random EOA placeholders. */
   realUniswapX?: boolean
@@ -138,6 +140,8 @@ export function defaultInit(s: VaultSigners, extras: VaultInitOverrides = {}) {
     valuationTimeout: extras.valuationTimeout ?? DAY,
     managementFeeWad: extras.managementFeeWad ?? 0n,
     performanceFeeWad: extras.performanceFeeWad ?? 0n,
+    protocolManagementShareWad: extras.protocolManagementShareWad ?? PROTOCOL_FEE_SHARE_WAD,
+    protocolPerformanceShareWad: extras.protocolPerformanceShareWad ?? PROTOCOL_FEE_SHARE_WAD,
     riskSignerDelay: extras.riskSignerDelay ?? DAY,
     minDepositAssets: extras.minDepositAssets ?? usdt(100n),
     minDepositCorridor: extras.minDepositCorridor ?? cngn(100n),
@@ -215,8 +219,7 @@ export async function deployOperatorVault(
     permit2,
     preferredFiller,
     await adapterImpl.getAddress(),
-    signers.protocolFeeRecipient.address,
-    extras.protocolFeeShareWad ?? PROTOCOL_FEE_SHARE_WAD
+    signers.protocolFeeRecipient.address
   )
 
   const init = defaultInit(signers, extras)

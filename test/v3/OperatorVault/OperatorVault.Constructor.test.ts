@@ -48,10 +48,12 @@ describe('OperatorVault — constructor and views', function () {
     const ctx = await deployOperatorVault()
     expect(await ctx.vault.factory()).to.equal(await ctx.factory.getAddress())
     expect(await ctx.factory.protocolFeeRecipient()).to.equal(ctx.protocolFeeRecipient.address)
-    expect(await ctx.factory.protocolFeeShareWad()).to.equal(PROTOCOL_FEE_SHARE_WAD)
-    const [recipient, share] = await ctx.factory.protocolFee()
+    const [recipient, managementShare, performanceShare] = await ctx.factory.protocolFeeFor(
+      await ctx.vault.getAddress()
+    )
     expect(recipient).to.equal(ctx.protocolFeeRecipient.address)
-    expect(share).to.equal(PROTOCOL_FEE_SHARE_WAD)
+    expect(managementShare).to.equal(PROTOCOL_FEE_SHARE_WAD)
+    expect(performanceShare).to.equal(PROTOCOL_FEE_SHARE_WAD)
     expect(await ctx.factory.VERSION()).to.equal(2)
   })
 

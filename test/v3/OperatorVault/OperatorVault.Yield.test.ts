@@ -85,8 +85,7 @@ describe('OperatorVault — idle yield', function () {
         ctx.permit2,
         ctx.preferredFiller,
         ethers.ZeroAddress,
-        ctx.protocolFeeRecipient.address,
-        PROTOCOL_FEE_SHARE_WAD
+        ctx.protocolFeeRecipient.address
       )
       const init = defaultInit(ctx, { enableYield: true })
       init.settlementAsset = await ctx.settlement.getAddress()

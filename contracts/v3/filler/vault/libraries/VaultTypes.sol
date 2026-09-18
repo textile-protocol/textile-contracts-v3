@@ -53,6 +53,9 @@ library VaultTypes {
     uint256 managementFeeWad;
     /// @dev Share of the gain above the high-water mark, WAD. Zero = off.
     uint256 performanceFeeWad;
+    /// @dev Textile's cut of each fee leg, WAD. Held on the factory, not the vault.
+    uint256 protocolManagementShareWad;
+    uint256 protocolPerformanceShareWad;
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
     /// @dev Minimum corridor-asset deposit, in corridor atomic units. Zero

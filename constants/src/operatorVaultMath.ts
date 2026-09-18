@@ -73,15 +73,15 @@ export const MAX_MANAGEMENT_FEE_WAD = WAD / 4n
 export const MAX_PERFORMANCE_FEE_WAD = WAD / 2n
 
 /**
- * Protocol cut of every operator-vault fee accrual, management and
- * performance alike, as a WAD fraction of the shares minted. Every
- * OperatorVaultFactory Textile deploys is constructed with this value
- * (deploy-operator-vault-factory.ts reads it), and each vault reads it back
- * from its factory at checkpoint. The on-chain immutable is the source of
- * truth; this is what the deploy script writes and what the UI previews
- * before a factory answers.
+ * Default Textile cut of an operator-vault fee leg, as a WAD fraction of the
+ * shares minted. The cut is set per vault at deploy (one for the management
+ * fee, one for the performance fee) and held on the factory; this is only
+ * what the admin form and the CLI example start from.
  */
 export const OPERATOR_VAULT_PROTOCOL_FEE_SHARE_WAD = WAD / 10n
+
+/** OperatorVaultFactory.MAX_PROTOCOL_FEE_SHARE_WAD: at most half of either fee leg. */
+export const MAX_PROTOCOL_FEE_SHARE_WAD = WAD / 2n
 
 /** WAD fraction → percent with up to two decimals (0.1e18 → 10). */
 export const wadToPercent = (wad: bigint): number =>

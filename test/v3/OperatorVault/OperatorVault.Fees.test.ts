@@ -104,8 +104,8 @@ describe('OperatorVault — management fee', function () {
         .withArgs(ctx.protocolFeeRecipient.address, positive, positive)
     })
 
-    it('takes nothing from a factory deployed with a zero cut', async function () {
-      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n, protocolFeeShareWad: 0n })
+    it('takes nothing from a vault deployed with a zero cut', async function () {
+      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n, protocolManagementShareWad: 0n, protocolPerformanceShareWad: 0n })
       const { whole, operator, protocol } = await accrueOneYear(ctx)
       expect(operator).to.equal(whole)
       expect(protocol).to.equal(0)
@@ -139,6 +139,34 @@ describe('OperatorVault — management fee', function () {
       expect(minted).to.be.gt(0)
       expect(await ctx.vault.balanceOf(ctx.protocolFeeRecipient.address)).to.equal(minted)
     })
+  })
+
+  it('splits each leg on its own terms', async function () {
+    // 10% of the management fee, 25% of the performance fee, set at deploy.
+    const ctx = await deployOperatorVault({
+      managementFeeWad: WAD / 50n,
+      performanceFeeWad: WAD / 5n,
+      protocolManagementShareWad: WAD / 10n,
+      protocolPerformanceShareWad: WAD / 4n,
+      minRedeemShares: usdt(1n),
+    })
+    await seedShares(ctx, ctx.lp1, usdt(1_000_000n))
+    const supply = await ctx.vault.totalSupply()
+    await ctx.settlement.mint(await ctx.vault.getAddress(), usdt(100_000n))
+    const navAssets = await ctx.vault.freeSettlement()
+    const before = await ctx.vault.lastFeeCheckpoint()
+    await time.increase(365 * DAY)
+    await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1n), ctx.lp1.address, ctx.lp1.address)
+    await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId())
+
+    const elapsed = (await ctx.vault.lastFeeCheckpoint()) - before
+    const mgmt = math.feeShares(supply, WAD / 50n, elapsed)
+    const perf = math.performanceFeeShares(navAssets, supply + mgmt, WAD, WAD / 5n)
+    const expected =
+      math.splitFee(mgmt, WAD / 10n).protocolShares + math.splitFee(perf, WAD / 4n).protocolShares
+    expect(expected).to.be.gt(0)
+    expect(await ctx.vault.balanceOf(ctx.protocolFeeRecipient.address)).to.equal(expected)
+    expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(mgmt + perf - expected)
   })
 
   describe('the protocol recipient can always exit its own dilution', function () {
@@ -211,7 +239,7 @@ describe('OperatorVault — management fee', function () {
     // A zero-cut factory: this block is about a lone residue holder owning
     // the whole supply. The split itself is covered under `protocol cut`.
     async function windDown(): Promise<DeployedVault> {
-      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 100n, protocolFeeShareWad: 0n })
+      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 100n, protocolManagementShareWad: 0n, protocolPerformanceShareWad: 0n })
       await seedShares(ctx, ctx.lp1)
 
       const lpShares = await ctx.vault.balanceOf(ctx.lp1.address)
@@ -272,7 +300,7 @@ describe('OperatorVault — management fee', function () {
       const ctx = await deployOperatorVault({
         managementFeeWad: WAD / 10n,
         minRedeemShares: usdt(200_000n),
-        protocolFeeShareWad: 0n,
+        protocolManagementShareWad: 0n, protocolPerformanceShareWad: 0n,
       })
       await seedShares(ctx, ctx.lp1, usdt(1_000_000n))
       await time.increase(365 * DAY)

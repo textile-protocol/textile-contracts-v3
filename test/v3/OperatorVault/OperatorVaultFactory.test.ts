@@ -3,7 +3,6 @@ import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
 import {
-  PROTOCOL_FEE_SHARE_WAD,
   WAD,
   defaultInit,
   deployOperatorVault,
@@ -154,19 +153,43 @@ describe('OperatorVaultFactory', function () {
       libraries: { VaultDeployer: vaultDeployer },
     })
     const addr = ethers.Wallet.createRandom().address
-    const share = PROTOCOL_FEE_SHARE_WAD
-    await expect(Factory.deploy(ethers.ZeroAddress, addr, addr, addr, addr, share)).to.be.reverted
-    await expect(Factory.deploy(addr, ethers.ZeroAddress, addr, addr, addr, share)).to.be.reverted
-    await expect(Factory.deploy(addr, addr, ethers.ZeroAddress, addr, addr, share)).to.be.reverted
+    await expect(Factory.deploy(ethers.ZeroAddress, addr, addr, addr, addr)).to.be.reverted
+    await expect(Factory.deploy(addr, ethers.ZeroAddress, addr, addr, addr)).to.be.reverted
+    await expect(Factory.deploy(addr, addr, ethers.ZeroAddress, addr, addr)).to.be.reverted
     // The protocol cut is the one thing an operator cannot change after the
     // fact, so a factory with no recipient or more than half the fee never
     // deploys in the first place.
-    await expect(Factory.deploy(addr, addr, addr, addr, ethers.ZeroAddress, share)).to.be.reverted
-    await expect(Factory.deploy(addr, addr, addr, addr, addr, WAD / 2n + 1n)).to.be.reverted
-    await expect(Factory.deploy(addr, addr, addr, addr, addr, WAD / 2n)).to.not.be.reverted
-    await expect(Factory.deploy(addr, addr, addr, addr, addr, 0n)).to.not.be.reverted
+    await expect(Factory.deploy(addr, addr, addr, addr, ethers.ZeroAddress)).to.be.reverted
     // A zero yield adapter implementation is allowed: yield just cannot be enabled.
-    await expect(Factory.deploy(addr, addr, addr, ethers.ZeroAddress, addr, share)).to.not.be.reverted
+    await expect(Factory.deploy(addr, addr, addr, ethers.ZeroAddress, addr)).to.not.be.reverted
+  })
+
+  it('records the protocol terms per vault, capped at half of either leg', async function () {
+    const deployed = await deployOperatorVault()
+    const init = defaultInit(deployed)
+    init.settlementAsset = await deployed.settlement.getAddress()
+    init.corridorAsset = await deployed.corridor.getAddress()
+    init.operatorAdmin = deployed.other.address
+    const factory = deployed.factory.connect(deployed.other)
+
+    await expect(
+      factory.deployVault({ ...init, protocolManagementShareWad: WAD / 2n + 1n })
+    ).to.be.reverted
+    await expect(
+      factory.deployVault({ ...init, protocolPerformanceShareWad: WAD / 2n + 1n })
+    ).to.be.reverted
+
+    const terms = { ...init, protocolManagementShareWad: WAD / 2n, protocolPerformanceShareWad: 0n }
+    await expect(factory.deployVault(terms)).to.emit(deployed.factory, 'ProtocolTermsSet')
+    const vault = await deployed.factory.vaultOf(
+      deployed.other.address,
+      init.settlementAsset,
+      init.corridorAsset
+    )
+    const [recipient, managementShare, performanceShare] = await deployed.factory.protocolFeeFor(vault)
+    expect(recipient).to.equal(deployed.protocolFeeRecipient.address)
+    expect(managementShare).to.equal(WAD / 2n)
+    expect(performanceShare).to.equal(0n)
   })
 
   it('wires Permit2 approvals on the two corridor assets', async function () {
