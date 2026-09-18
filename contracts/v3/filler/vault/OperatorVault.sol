@@ -50,7 +50,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint64 closedAt;
     /// @dev Deposit epochs only: units are corridor, not settlement.
     bool inCorridor;
-    uint256 assets;
+    /// @dev Queued into the epoch: deposit assets for a deposit epoch, shares
+    ///      for a redeem epoch. `remainingUnits` is the same net of claims.
+    uint256 units;
     uint256 shares;
     uint256 remainingUnits;
     uint256 remainingSettlement;
@@ -277,7 +279,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     if (assets == 0) revert VaultErrors.NothingToClaim();
 
     requestUnits[controller][requestId] = 0;
-    epoch.assets -= assets;
+    epoch.units -= assets;
     _refundPending(epoch.inCorridor, controller, assets);
 
     emit DepositCancelled(controller, requestId, assets);
@@ -288,6 +290,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     Epoch storage epoch = epochs[epochId];
     if (!epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
     if (block.timestamp < epoch.cutoff) revert VaultErrors.EpochNotReady();
+    // Only one can match; branching on `inCorridor` to skip the other SLOAD
+    // costs more bytecode than the vault has (audit v0.2 §6 Code 3).
     if (currentDepositEpochId == epochId) currentDepositEpochId = 0;
     if (currentCorridorDepositEpochId == epochId) currentCorridorDepositEpochId = 0;
     _closeEpoch(epochId, epoch);
@@ -302,7 +306,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ) external override nonReentrant {
     if (paused) revert VaultErrors.EnforcedPause();
     Epoch storage epoch = _closedEpoch(epochId, true);
-    if (epoch.assets == 0) {
+    if (epoch.units == 0) {
       epoch.state = EpochState.Processed;
       // Price 0, not `attestation.corridorAssetPrice`: this branch returns
       // before `verifyAttestation`, so the struct is unsigned caller input and
@@ -318,7 +322,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     _checkpointFee(conversionNav);
 
     uint256 supply = totalSupply();
-    uint256 assets = epoch.assets;
+    uint256 assets = epoch.units;
     bool inCorridor = epoch.inCorridor;
     // Corridor is valued at the signed price first, then converts like settlement.
     uint256 value =
@@ -348,6 +352,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ///      whoever lands first wins. Voiding only refunds depositors their own
   ///      settlement, so there is no loss either way — size the timeout
   ///      comfortably past the operator's expected processing window.
+  ///
+  ///      No key, no pause check, works while wedged — one of the two exits
+  ///      that always hold (`settleRedeemEmergencyInKind` is the other, after
+  ///      its timeout). Keep it that way: together they are why an abandoned
+  ///      vault is not a permanent lock.
   function voidDepositEpoch(uint256 epochId) external override {
     Epoch storage epoch = _closedEpoch(epochId, true);
     _requireElapsed(epoch.closedAt, valuationTimeout);
@@ -375,7 +384,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
     requestId = _openOrCurrentRedeemEpoch();
     _pullShares(owner, shares);
-    epochs[requestId].assets += shares;
+    epochs[requestId].units += shares;
     requestUnits[controller][requestId] += shares;
 
     emit RedeemRequest(controller, owner, requestId, msg.sender, shares);
@@ -429,7 +438,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     _checkpointFee(isPaused ? liveNav : conversionNav);
     uint256 supply = totalSupply();
 
-    uint256 shares = epoch.assets;
+    uint256 shares = epoch.units;
     // Snapshot pro-rata while anyone else still holds shares, so a UniswapX
     // input pull above the attested floors cannot inflate this epoch's take.
     // Last-claimer live payout is only safe after pause (ERC-1271 dead).
@@ -471,7 +480,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint256 freeS = _liquidSettlement();
     uint256 freeC = _freeCorridor();
 
-    uint256 shares = epoch.assets;
+    uint256 shares = epoch.units;
     uint256 settlementOut;
     uint256 corridorOut;
     uint256 yieldOut;
@@ -518,7 +527,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     requestUnits[controller][requestId] = 0;
 
     if (epoch.isDeposit && epoch.state == EpochState.Voided) {
-      epoch.assets -= units;
+      epoch.units -= units;
       bool inCorridor = epoch.inCorridor;
       _refundPending(inCorridor, receiver, units);
       emit Claimed(controller, receiver, requestId, 0, inCorridor ? 0 : units, inCorridor ? units : 0);
@@ -603,6 +612,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Validates a two-signature vault envelope at fill time.
+  /// @dev Reaches Aave via `_freeSettlement()`, so a reverting pool/aToken view
+  ///      fails every fill, not just the yield paths.
   function isValidSignature(bytes32 hash, bytes calldata signature) external view override returns (bytes4) {
     if (paused) return VaultLib.ERC1271_FAIL;
     return VaultPolicy.validateEnvelope(hash, signature, address(this));
@@ -698,6 +709,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     emit MinLiquidSettlementUpdated(previous, next);
   }
 
+  /// @dev Guarded because it mints via `_checkpointFee`; the other setters
+  ///      write one word and call nothing, so they are not.
   function setFeeRecipient(address next) external onlyOperatorAdmin nonReentrant {
     if (next == address(0)) revert VaultErrors.ZeroAddress();
     _checkpointFee(0);
@@ -822,7 +835,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     _pullExact(inCorridor ? corridorAsset : settlementAsset, owner, assets);
     if (inCorridor) pendingCorridor += assets;
     else pendingSettlement += assets;
-    epoch.assets += assets;
+    epoch.units += assets;
     requestUnits[controller][requestId] += assets;
 
     emit DepositRequest(controller, owner, requestId, msg.sender, assets, inCorridor);
@@ -854,6 +867,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     _openEpoch(id, true, inCorridor, uint64(cutoffTs));
   }
 
+  /// @dev No cutoff: the epoch never closes itself, so it stays Open until
+  ///      someone calls `closeRedeemEpoch`. That is why the close keeps a
+  ///      permissionless backstop — someone has to close an epoch the
+  ///      operator walked away from.
   function _openOrCurrentRedeemEpoch() private returns (uint256 id) {
     id = currentRedeemEpochId;
     if (id != 0 && epochs[id].state == EpochState.Open) return id;
@@ -877,7 +894,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   function _closeEpoch(uint256 id, Epoch storage epoch) private {
     epoch.state = EpochState.Closed;
     epoch.closedAt = uint64(block.timestamp);
-    emit EpochClosed(id, epoch.isDeposit, epoch.assets);
+    emit EpochClosed(id, epoch.isDeposit, epoch.units);
   }
 
   function _finishRedeemSettle(
@@ -887,7 +904,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint256 corridorOut,
     uint256 price
   ) private {
-    uint256 shares = epoch.assets;
+    uint256 shares = epoch.units;
     if (shares > 0) _burn(address(this), shares);
     reservedSettlement += settlementOut;
     reservedCorridor += corridorOut;
@@ -971,6 +988,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   /// @dev Economic free settlement: liquid plus the adapter position. NAV,
   ///      quotable, and attestation floors all price the full inventory.
+  ///      Hot path: `isValidSignature` hits this on every fill, so Aave's
+  ///      views sit inside the Permit2 pull.
   function _freeSettlement() private view returns (uint256) {
     return _liquidSettlement() + _heldSettlement();
   }

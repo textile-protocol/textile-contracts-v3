@@ -17,11 +17,11 @@ describe('OperatorVault — remaining edges', function () {
     await vault.connect(lp1).requestDeposit(usdt(100n), lp1.address, lp1.address)
     const second = await vault.currentDepositEpochId()
     expect(second).to.equal(first + 1n)
-    expect((await vault.epochs(second)).assets).to.equal(usdt(100n))
+    expect((await vault.epochs(second)).units).to.equal(usdt(100n))
     // The past-cutoff epoch is unaffected and closes as usual.
     await vault.closeDepositEpoch(first)
     expect((await vault.epochs(first)).state).to.equal(2) // Closed
-    expect((await vault.epochs(first)).assets).to.equal(usdt(100n))
+    expect((await vault.epochs(first)).units).to.equal(usdt(100n))
   })
 
   it('processes an empty deposit epoch after every request is cancelled', async function () {

@@ -54,6 +54,8 @@ interface IYieldAdapter {
   function deploy(uint256 assets) external;
 
   /// @notice Withdraw `assets` back to the vault. Vault only.
+  /// @dev A reverting `recall` must move nothing: `tryRecallAllIdle` re-reads
+  ///      `held()` only on success. Returning less than `assets` is fine.
   /// @param assets Underlying amount, or `type(uint256).max` for everything.
   /// @return withdrawn Underlying amount actually sent to the vault.
   function recall(uint256 assets) external returns (uint256 withdrawn);

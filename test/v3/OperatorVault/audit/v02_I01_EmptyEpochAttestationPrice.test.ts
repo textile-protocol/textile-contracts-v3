@@ -1,7 +1,7 @@
 /**
  * Audit regression — I-01 (in-house report v0.2, 2026-09-17)
  *
- * `processDepositEpoch` returns early when `epoch.assets == 0`, before
+ * `processDepositEpoch` returns early when `epoch.units == 0`, before
  * `verifyAttestation` runs. It used to emit `attestation.corridorAssetPrice`
  * into `DepositEpochProcessed`, so any caller — the entry point is
  * permissionless — could push an arbitrary unsigned price into the log and

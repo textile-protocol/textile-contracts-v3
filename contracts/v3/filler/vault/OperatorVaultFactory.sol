@@ -213,6 +213,8 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     address settlementAsset,
     address corridorAsset
   ) external {
+    // Bounds the loop below: only a vault this factory deployed may call, so
+    // the list walked is its own operator's, paid for one deployment at a time.
     if (!isVault[msg.sender]) revert VaultErrors.NotAuthorized();
     if (toAdmin == address(0) || fromAdmin == toAdmin) revert VaultErrors.InvalidParams();
     address[] storage from = _vaultsOf[_key(fromAdmin, settlementAsset, corridorAsset)];

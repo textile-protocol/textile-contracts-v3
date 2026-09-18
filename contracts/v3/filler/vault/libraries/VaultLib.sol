@@ -55,6 +55,9 @@ library VaultLib {
     uint256 validUntil;
   }
 
+  /// @dev The +1 offset bounds donation inflation on a near-empty vault. It is
+  ///      not a check on `totalAssets`, which on the deposit path is the risk
+  ///      key's signed NAV — see audit v0.2 H-01.
   function convertToShares(uint256 assets, uint256 supply, uint256 totalAssets, Math.Rounding rounding)
     internal
     pure

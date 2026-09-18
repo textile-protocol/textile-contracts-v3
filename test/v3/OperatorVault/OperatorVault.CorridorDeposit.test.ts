@@ -59,7 +59,7 @@ describe('OperatorVault — corridor deposits', function () {
     const epoch = await ctx.vault.epochs(id)
     expect(epoch.isDeposit).to.equal(true)
     expect(epoch.inCorridor).to.equal(true)
-    expect(epoch.assets).to.equal(amount)
+    expect(epoch.units).to.equal(amount)
     expect(await ctx.vault.requestUnits(ctx.lp1.address, id)).to.equal(amount)
 
     expect(await ctx.vault.pendingCorridor()).to.equal(amount)
@@ -95,8 +95,8 @@ describe('OperatorVault — corridor deposits', function () {
       .connect(ctx.lp1)
       .requestDepositCorridor(cngn(500n), ctx.lp1.address, ctx.lp1.address)
     expect(await ctx.vault.currentCorridorDepositEpochId()).to.equal(corridorId)
-    expect((await ctx.vault.epochs(corridorId)).assets).to.equal(cngn(1_500n))
-    expect((await ctx.vault.epochs(settlementId)).assets).to.equal(usdt(1_000n))
+    expect((await ctx.vault.epochs(corridorId)).units).to.equal(cngn(1_500n))
+    expect((await ctx.vault.epochs(settlementId)).units).to.equal(usdt(1_000n))
 
     // Closing one stream leaves the other's pointer alone.
     await time.increase(DAY)
@@ -261,7 +261,7 @@ describe('OperatorVault — corridor deposits', function () {
       .to.emit(ctx.vault, 'RedeemEpochSettled')
       .withArgs(redeemId, usdt(1_000n), usdt(1_000n), 0n)
     expect(await ctx.vault.pendingCorridor()).to.equal(pending)
-    expect((await ctx.vault.epochs(corridorId)).assets).to.equal(pending)
+    expect((await ctx.vault.epochs(corridorId)).units).to.equal(pending)
   })
 
   it('refunds corridor at face value when the valuation times out', async function () {

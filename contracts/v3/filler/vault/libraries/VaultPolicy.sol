@@ -39,10 +39,14 @@ interface IVaultSignatureSource {
   function riskSigner() external view returns (address);
 }
 
-/// @notice Linked library: order policy, constructor checks, and yield-adapter
-///         plumbing. Kept out of OperatorVault so the factory stays under the
-///         24kb runtime cap. Non-view functions run as delegatecalls from the
-///         vault, so the adapter always sees the vault as caller.
+/// @notice Linked library: order policy, constructor checks, fee accrual, the
+///         admin lifecycle, sweeps, and yield-adapter plumbing. Kept out of
+///         OperatorVault so the factory stays under the 24kb runtime cap.
+///         Non-view functions run as delegatecalls from the vault, so the
+///         adapter always sees the vault as caller.
+/// @dev    Not a trust boundary: a substituted library at link time is a full
+///         vault compromise, so the linked address is part of the vault's
+///         identity. `VaultVerificationBundle.test.ts` pins it.
 library VaultPolicy {
   using SafeERC20 for IERC20;
 
@@ -148,6 +152,9 @@ library VaultPolicy {
   /// @notice Size and address checks for `requestRedeem`. Both fee recipients
   ///         are exempt from the floor: their positions are pure dilution
   ///         residue and there is no other way out of the vault.
+  /// @dev Not cached into an immutable: costs more bytecode than the vault has
+  ///      (audit v0.2 §6 Code 2, numbers in the commit). `&&` short-circuits,
+  ///      so the ordinary path never makes the call.
   function validateRedeemRequest(
     uint256 shares,
     uint256 minRedeemShares,
@@ -223,6 +230,7 @@ library VaultPolicy {
       // Only re-read on success: the catch means the withdrawal reverted, so
       // nothing moved and `held` still stands. That is the paused-reserve
       // case this function exists for, so it is the one worth not paying for.
+      // `IYieldAdapter.recall` requires that; this is where it is spent.
       held = adapter.held();
     } catch {} // solhint-disable-line no-empty-blocks
     return held > reserved ? held - reserved : 0;
