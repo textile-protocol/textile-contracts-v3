@@ -15,6 +15,8 @@ library VaultLib {
 
   uint256 internal constant WAD = 1e18;
   uint256 internal constant YEAR = 365 days;
+  /// @notice Largest dilution one fee checkpoint may charge, WAD.
+  uint256 internal constant MAX_FEE_ACCRUAL_WAD = 5e17;
   uint256 internal constant EPOCH_NONCE_SHIFT = 128;
   bytes4 internal constant ERC1271_FAIL = 0xffffffff;
 
@@ -92,9 +94,16 @@ library VaultLib {
     return freeBalance - minReserve;
   }
 
+  /// @notice Management-fee mint, grossed up by `1 - f` so the dilution it
+  ///         causes is exactly `f` and not `f / (1 + f)`. Audit v0.2 I-02.
+  ///         The clamp keeps the denominator positive; it binds only on a
+  ///         vault left uncheckpointed for years near the rate cap.
   function feeShares(uint256 supply, uint256 feeWad, uint256 elapsed) internal pure returns (uint256) {
     if (supply == 0 || feeWad == 0 || elapsed == 0) return 0;
-    return Math.mulDiv(supply, feeWad * elapsed, WAD * YEAR);
+    uint256 accrual = feeWad * elapsed;
+    uint256 ceiling = MAX_FEE_ACCRUAL_WAD * YEAR;
+    if (accrual > ceiling) accrual = ceiling;
+    return Math.mulDiv(supply, accrual, WAD * YEAR - accrual);
   }
 
   /// @notice Split one fee accrual between the operator and the protocol.

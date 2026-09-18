@@ -64,13 +64,23 @@ export function quotable(freeBalance: bigint, minReserve: bigint): bigint {
   return freeBalance - minReserve
 }
 
+/** VaultLib.MAX_FEE_ACCRUAL_WAD: most one fee checkpoint may dilute. */
+export const MAX_FEE_ACCRUAL_WAD = WAD / 2n
+
+/**
+ * Mirrors VaultLib.feeShares. Grossed up by `1 - f` so the dilution is exactly
+ * `f`, not `f / (1 + f)`, and clamped to keep the denominator positive.
+ */
 export function feeShares(
   supply: bigint,
   feeWad: bigint,
   elapsed: bigint
 ): bigint {
   if (supply === 0n || feeWad === 0n || elapsed === 0n) return 0n
-  return mulDiv(supply, feeWad * elapsed, WAD * YEAR)
+  const ceiling = MAX_FEE_ACCRUAL_WAD * YEAR
+  const accrual = feeWad * elapsed
+  const capped = accrual > ceiling ? ceiling : accrual
+  return mulDiv(supply, capped, WAD * YEAR - capped)
 }
 
 /** VaultPolicy.MAX_MANAGEMENT_FEE_WAD: 25% of supply per year. */

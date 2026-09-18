@@ -14,6 +14,7 @@ import {
   proRataWithResidue,
   quotable,
   tradingNonce,
+  MAX_FEE_ACCRUAL_WAD,
   WAD,
 } from '../../../constants/src/operatorVaultMath'
 
@@ -35,12 +36,41 @@ describe('operatorVaultMath (TS reference)', function () {
     expect(feeShares(0n, 1n, 1n)).to.equal(0n)
     expect(feeShares(1n, 0n, 1n)).to.equal(0n)
     expect(feeShares(1n, 1n, 0n)).to.equal(0n)
+    expect(feeShares(900n, WAD / 10n, YEAR)).to.equal(100n)
+    // f >= 1 clamps, minting one share per share outstanding.
     expect(feeShares(YEAR, WAD, YEAR)).to.equal(YEAR)
+    expect(feeShares(1000n, WAD * 3n, YEAR)).to.equal(1000n)
     expect(epochFromNonce(tradingNonce(3n, 5n))).to.equal(3n)
     expect(proRataWithResidue(0n, 1n, 10n)).to.equal(0n)
     expect(proRataWithResidue(1n, 0n, 10n)).to.equal(0n)
     expect(proRataWithResidue(2n, 2n, 7n)).to.equal(7n)
     expect(proRataWithResidue(1n, 2n, 7n)).to.equal(3n)
+  })
+
+  it('dilutes LPs by exactly the nominal management rate', function () {
+    const supply = 1_000_000n * WAD
+    for (const [feeWad, elapsed, expectedWad] of [
+      [WAD / 50n, YEAR, WAD / 50n],
+      [WAD / 100n, YEAR, WAD / 100n],
+      [WAD / 4n, YEAR, WAD / 4n],
+      [WAD / 50n, YEAR / 2n, WAD / 100n],
+      [WAD / 50n, YEAR * 5n, WAD / 10n],
+    ] as const) {
+      const minted = feeShares(supply, feeWad, elapsed)
+      const slice = (minted * WAD) / (supply + minted)
+      // The mint floors, so the slice lands at or just under the rate.
+      expect(slice).to.be.gte(expectedWad - 1n)
+      expect(slice).to.be.lte(expectedWad)
+    }
+  })
+
+  it('never mints more than the accrual clamp allows', function () {
+    const supply = 1_000_000n * WAD
+    for (const elapsed of [YEAR * 4n, YEAR * 40n, YEAR * 400n]) {
+      const minted = feeShares(supply, WAD / 4n, elapsed)
+      const slice = (minted * WAD) / (supply + minted)
+      expect(slice).to.equal(MAX_FEE_ACCRUAL_WAD)
+    }
   })
 
   it('covers the performance-fee branches', function () {

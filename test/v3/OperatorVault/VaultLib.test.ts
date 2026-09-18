@@ -31,7 +31,18 @@ describe('VaultLib', function () {
     expect(await harness.feeShares(0, WAD / 10n, 365 * 24 * 60 * 60)).to.equal(0)
     expect(await harness.feeShares(1000, 0, 365 * 24 * 60 * 60)).to.equal(0)
     expect(await harness.feeShares(1000, WAD / 10n, 0)).to.equal(0)
-    expect(await harness.feeShares(1000, WAD / 10n, 365 * 24 * 60 * 60)).to.equal(100)
+    // 111 of 1111 is 10% of the vault; 100 of 1100 would be 9.09%.
+    expect(await harness.feeShares(1000, WAD / 10n, 365 * 24 * 60 * 60)).to.equal(111)
+  })
+
+  it('clamps the accrual so the gross-up denominator stays positive', async function () {
+    const { harness } = await deployOperatorVault()
+    const year = BigInt(365 * 24 * 60 * 60)
+    expect(await harness.feeShares(1000n, WAD, year)).to.equal(1000n)
+    expect(await harness.feeShares(1000n, WAD, year * 100n)).to.equal(1000n)
+    // Binds at 2 years for the 25% config cap, not before.
+    expect(await harness.feeShares(1000n, WAD / 4n, year * 2n)).to.equal(1000n)
+    expect(await harness.feeShares(1000n, WAD / 4n, year)).to.equal(333n)
   })
 
   it('matches the TS reference for the performance fee and the mark', async function () {
