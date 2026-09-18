@@ -13,6 +13,16 @@ export const EPOCH_NONCE_SHIFT = 128n
 
 const mulDiv = (a: bigint, b: bigint, c: bigint): bigint => (a * b) / c
 
+/**
+ * 10^n as a bigint, built from a string for the same reason `WAD` is: under
+ * babel-jest a bigint `**` becomes `Math.pow`, which throws on BigInt. That
+ * used to be a load-time hazard only — `WAD` is a module constant — but
+ * `nav()` reaches for a power at *call* time whenever the two assets have
+ * different decimals, so every web caller of it (the redeem preview, any
+ * test that exercises one) hit `Cannot convert a BigInt value to a number`.
+ */
+const pow10 = (n: number): bigint => BigInt('1'.padEnd(n + 1, '0'))
+
 export function convertToShares(
   assets: bigint,
   supply: bigint,
@@ -42,10 +52,10 @@ export function nav(
 ): bigint {
   if (freeCorridor === 0n || priceWad === 0n) return freeSettlement
   if (settlementDecimals >= corridorDecimals) {
-    const exp = BigInt(settlementDecimals - corridorDecimals)
-    return freeSettlement + mulDiv(freeCorridor, priceWad, WAD / 10n ** exp)
+    const exp = settlementDecimals - corridorDecimals
+    return freeSettlement + mulDiv(freeCorridor, priceWad, WAD / pow10(exp))
   }
-  const scale = 10n ** BigInt(corridorDecimals - settlementDecimals)
+  const scale = pow10(corridorDecimals - settlementDecimals)
   return freeSettlement + mulDiv(freeCorridor, priceWad, scale * WAD)
 }
 
