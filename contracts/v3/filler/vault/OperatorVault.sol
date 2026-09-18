@@ -442,8 +442,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     // input pull above the attested floors cannot inflate this epoch's take.
     // Last-claimer live payout is only safe after pause (ERC-1271 dead).
     // Unpaused last-exit would underpay redeemers mid-fill and stamp the
-    // swap output as orphaned NAV. When paused, use live as the floor so a
-    // hostile risk key cannot settle a partial epoch at 0 and lock out
+    // swap output as orphaned NAV. When paused, use live as the floor so
+    // hostile signers cannot settle a partial epoch at 0 and lock out
     // `settleRedeemEmergencyInKind`.
     if (shares == supply && !isPaused) revert VaultErrors.PauseRequired();
     uint256 floorS = isPaused ? freeS : attestation.freeSettlement;
@@ -458,13 +458,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Last-resort exit when the risk signer cannot attest. Pays live free
+  /// @dev Last-resort exit when the signers cannot attest. Pays live free
   ///      balances, including unattested surplus, so it pauses first if the
   ///      guardian has not: an unpaused split could race a Permit2 pull.
-  ///      The recall is best-effort and nothing here
-  ///      touches the external protocol: whatever Aave cannot pay back is
-  ///      booked as a pro-rata in-kind claim on the yield token, which the
-  ///      redeemers collect at claim time. See `pendingYieldPull`.
+  ///      The recall and the yield-token transfer are best-effort: whatever
+  ///      Aave will not pay back is booked as a pro-rata in-kind claim on the
+  ///      yield token, collected at claim time (see `pendingYieldPull`). The
+  ///      adapter's views (`held`, `toScaled`, `fromScaled`) are still read
+  ///      outside the try/catch, so a pool whose views revert blocks this
+  ///      exit too (audit v0.2 L-03).
   function settleRedeemEmergencyInKind(uint256 epochId) external override nonReentrant {
     Epoch storage epoch = _closedEpoch(epochId, false);
     _requireElapsed(epoch.closedAt, emergencyExitTimeout);
@@ -483,8 +485,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint256 settlementOut;
     uint256 corridorOut;
     uint256 yieldOut;
-    // One guard for all three legs: it is only here so a fully-drained supply
-    // cannot divide by zero.
+    // Defensive: a closed redeem epoch always carries shares (there is no
+    // redeem cancel), so `supply` cannot be zero here.
     if (shares > 0) {
       settlementOut = Math.mulDiv(freeS, shares, supply);
       corridorOut = Math.mulDiv(freeC, shares, supply);
@@ -1059,19 +1061,18 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     return VaultLib.nav(_freeSettlement(), _freeCorridor(), priceWad, settlementDecimals, corridorDecimals);
   }
 
-  /// @notice Verifies the attestation, then checks it against live state.
-  ///         One function for both epoch paths, which keeps the vault under
-  ///         the bytecode cap.
-  ///         Attestations bind `lastSettledNav` so a prior epoch cannot be
-  ///         replayed after settlement. Live free balances and live NAV must
-  ///         be at least the signed snapshot: a UniswapX input pull that eats
-  ///         attested inventory reverts. Surplus (donations, completed fills)
-  ///         is allowed so it cannot grief settlement, but conversion uses
-  ///         the signed NAV — live `balanceOf` can drop in
-  ///         `executeWithCallback` while still sitting above the floors.
-  ///         Surplus is marked in afterwards via `_recordSettledNav`. A
-  ///         bootstrap deposit epoch ignores the signed NAV altogether: see
-  ///         `processDepositEpoch`.
+  /// @dev Verifies the attestation, then checks it against live state. One
+  ///      function for both epoch paths, which keeps the vault under the
+  ///      bytecode cap.
+  ///      Attestations bind `lastSettledNav` so a prior epoch cannot be
+  ///      replayed after settlement. Live free balances and live NAV must be
+  ///      at least the signed snapshot: a UniswapX input pull that eats
+  ///      attested inventory reverts. Surplus (donations, completed fills) is
+  ///      allowed so it cannot grief settlement, but conversion uses the
+  ///      signed NAV — live `balanceOf` can drop in `executeWithCallback`
+  ///      while still sitting above the floors. Surplus is marked in
+  ///      afterwards via `_recordSettledNav`. A bootstrap deposit epoch
+  ///      ignores the signed NAV altogether: see `processDepositEpoch`.
   function _verifiedLiveNav(
     uint256 epochId,
     VaultLib.NavAttestation calldata att,

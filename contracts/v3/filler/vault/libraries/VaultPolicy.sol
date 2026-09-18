@@ -109,7 +109,8 @@ library VaultPolicy {
     corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
   }
 
-  /// @notice One checkpoint, both fee legs, each split with the protocol on its own terms. One call: the vault has no bytecode for two.
+  /// @notice One checkpoint, both fee legs, each split with the protocol on
+  ///         its own terms. One call: the vault has no bytecode for two.
   /// @param navAssets Attested NAV, never a live read; zero skips the performance leg.
   function checkpointAccrual(
     uint256 supply,
@@ -152,9 +153,10 @@ library VaultPolicy {
   /// @notice Size and address checks for `requestRedeem`. Both fee recipients
   ///         are exempt from the floor: their positions are pure dilution
   ///         residue and there is no other way out of the vault.
-  /// @dev Not cached into an immutable: costs more bytecode than the vault has
-  ///      (audit v0.2 §6 Code 2, numbers in the commit). `&&` short-circuits,
-  ///      so the ordinary path never makes the call.
+  /// @dev The protocol recipient is read from the factory rather than cached
+  ///      in an immutable: the immutable costs more bytecode than the vault
+  ///      has spare (audit v0.2 §6 Code 2). `&&` short-circuits, so the
+  ///      ordinary path never makes the call.
   function validateRedeemRequest(
     uint256 shares,
     uint256 minRedeemShares,
@@ -227,10 +229,8 @@ library VaultPolicy {
     if (held <= reserved) return 0;
     try adapter.recall(_recallAmount(held, reserved)) returns (uint256 withdrawn) {
       emit IOperatorVault.IdleRecalled(withdrawn);
-      // Only re-read on success: the catch means the withdrawal reverted, so
-      // nothing moved and `held` still stands. That is the paused-reserve
-      // case this function exists for, so it is the one worth not paying for.
-      // `IYieldAdapter.recall` requires that; this is where it is spent.
+      // Re-read only on success: a reverted withdrawal moves nothing, so the
+      // pre-call `held` still stands (`IYieldAdapter.recall` requires that).
       held = adapter.held();
     } catch {} // solhint-disable-line no-empty-blocks
     return held > reserved ? held - reserved : 0;

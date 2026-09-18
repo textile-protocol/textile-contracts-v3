@@ -56,8 +56,8 @@ library VaultLib {
   }
 
   /// @dev The +1 offset bounds donation inflation on a near-empty vault. It is
-  ///      not a check on `totalAssets`, which on the deposit path is the risk
-  ///      key's signed NAV — see audit v0.2 H-01.
+  ///      not a check on `totalAssets`, which on the deposit path is the
+  ///      co-signed attested NAV, not a balance read (audit v0.2 H-01).
   function convertToShares(uint256 assets, uint256 supply, uint256 totalAssets, Math.Rounding rounding)
     internal
     pure
@@ -122,7 +122,8 @@ library VaultLib {
     operatorShares = shares - protocolShares;
   }
 
-  /// @notice `feeWad` of the NAV above the mark, minted against post-fee NAV; the cap < 100% keeps the denominator > 0.
+  /// @notice `feeWad` of the NAV above the mark, minted against post-fee NAV;
+  ///         the cap below 100% keeps the denominator positive.
   function performanceFeeShares(uint256 navAssets, uint256 supply, uint256 markWad, uint256 feeWad)
     internal
     pure

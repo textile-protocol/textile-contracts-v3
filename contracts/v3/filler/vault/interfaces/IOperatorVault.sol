@@ -67,7 +67,8 @@ interface IOperatorVault {
   function cancelDeposit(uint256 requestId, address controller) external;
 
   /// @notice Queue a redemption. Minimum `minRedeemShares`, except for the
-  ///         fee recipient — the floor would strand its dilution residue.
+  ///         two fee recipients (operator and protocol) — the floor would
+  ///         strand their dilution residue.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     returns (uint256 requestId);
@@ -98,8 +99,8 @@ interface IOperatorVault {
   /// @notice Settle a closed redeem epoch against a dual-signed attestation.
   ///         Redeemers are paid both assets pro rata to their share of
   ///         supply, off the attested free balances, so the payout never
-  ///         depends on the corridor price. A full-supply exit requires the
-  ///         vault to be paused and pays live balances instead.
+  ///         depends on the corridor price. Settling while paused pays live
+  ///         balances instead, and a full-supply exit requires the pause.
   function settleRedeemEpoch(
     uint256 epochId,
     VaultLib.NavAttestation calldata attestation,
@@ -112,12 +113,13 @@ interface IOperatorVault {
   ///         Pauses the vault if the guardian has not already, then pays live
   ///         free balances, including unattested surplus. Anyone may call, so
   ///         a silent operator cannot lock converted capital. Attested
-  ///         settlement while paused also pays live, so a hostile risk key
+  ///         settlement while paused also pays live, so hostile signers
   ///         cannot pre-settle a partial epoch at zero and block this path.
-  ///         The adapter recall is best-effort and this path never calls the
-  ///         external protocol: a position Aave cannot pay back becomes a
-  ///         pro-rata in-kind claim on the yield token, collected at claim
-  ///         time, so an impaired external protocol cannot block this exit.
+  ///         The adapter recall is best-effort: a position Aave cannot pay
+  ///         back becomes a pro-rata in-kind claim on the yield token,
+  ///         collected at claim time, so a paused or illiquid reserve cannot
+  ///         block this exit. Only the adapter's view reads sit outside that
+  ///         try/catch.
   /// @param epochId Closed redeem epoch to settle.
   function settleRedeemEmergencyInKind(uint256 epochId) external;
 
