@@ -429,16 +429,17 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Last-resort exit when the risk signer cannot attest. Pause first so
-  ///      Permit2 cannot pull mid-split. Pays live free balances, including
-  ///      unattested surplus. The recall is best-effort and nothing here
+  /// @dev Last-resort exit when the risk signer cannot attest. Pays live free
+  ///      balances, including unattested surplus, so it pauses first if the
+  ///      guardian has not: an unpaused split could race a Permit2 pull.
+  ///      The recall is best-effort and nothing here
   ///      touches the external protocol: whatever Aave cannot pay back is
   ///      booked as a pro-rata in-kind claim on the yield token, which the
   ///      redeemers collect at claim time. See `pendingYieldPull`.
   function settleRedeemEmergencyInKind(uint256 epochId) external override nonReentrant {
-    if (!paused) revert VaultErrors.PauseRequired();
     Epoch storage epoch = _closedEpoch(epochId, false);
     _requireElapsed(epoch.closedAt, emergencyExitTimeout);
+    if (!paused) _pause();
     // Best-effort: never reverts on the adapter, and returns only the free
     // part of what it could not bring back — a slice a previous emergency
     // exit already owes redeemers is left alone and not resold here.
@@ -594,9 +595,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   function pause() external onlyGuardian {
     if (paused) revert VaultErrors.InvalidParams();
-    paused = true;
-    _bumpTradingEpoch();
-    emit Paused(msg.sender);
+    _pause();
   }
 
   function unpause() external onlyGuardian {
@@ -912,6 +911,13 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ///      cannot underflow.
   function _durationElapsed(uint256 startedAt, uint256 duration) private view returns (bool) {
     return block.timestamp - startedAt >= duration;
+  }
+
+  /// @dev Kills ERC-1271 and every outstanding order.
+  function _pause() private {
+    paused = true;
+    _bumpTradingEpoch();
+    emit Paused(msg.sender);
   }
 
   function _bumpTradingEpoch() private returns (uint256 epoch) {

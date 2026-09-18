@@ -149,16 +149,29 @@ describe('OperatorVault — recovery', function () {
       )
     })
 
-    it('refuses to run unless the vault is paused', async function () {
+    it('pauses the vault itself after the timeout when the guardian never did', async function () {
       const ctx = await deployOperatorVault()
       await seedShares(ctx, ctx.lp1)
       await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(400n), ctx.lp1.address, ctx.lp1.address)
       const epochId = await closeRedeem(ctx)
-      await time.increase(await ctx.vault.emergencyExitTimeout())
-      await expect(ctx.vault.settleRedeemEmergencyInKind(epochId)).to.be.revertedWithCustomError(
+      const epochBefore = await ctx.vault.tradingEpoch()
+      await expect(ctx.vault.connect(ctx.lp2).settleRedeemEmergencyInKind(epochId)).to.be.revertedWithCustomError(
         ctx.vault,
-        'PauseRequired'
+        'TimeoutNotReached'
       )
+      expect(await ctx.vault.paused()).to.equal(false)
+      await time.increase(await ctx.vault.emergencyExitTimeout())
+      await expect(ctx.vault.connect(ctx.lp2).settleRedeemEmergencyInKind(epochId))
+        .to.emit(ctx.vault, 'Paused')
+        .withArgs(ctx.lp2.address)
+        .and.to.emit(ctx.vault, 'RedeemEpochSettled')
+        .withArgs(epochId, usdt(400n), usdt(400n), 0n)
+      expect(await ctx.vault.paused()).to.equal(true)
+      expect(await ctx.vault.tradingEpoch()).to.equal(epochBefore + 1n)
+      expect(await ctx.vault.isValidSignature(ethers.ZeroHash, '0x')).to.equal(ERC1271_FAIL)
+      await expect(ctx.vault.connect(ctx.lp2).unpause()).to.be.revertedWithCustomError(ctx.vault, 'NotAuthorized')
+      await ctx.vault.connect(ctx.guardian).unpause()
+      expect(await ctx.vault.paused()).to.equal(false)
     })
 
     it('rejects a deposit epoch, an open redeem, and a settled epoch', async function () {

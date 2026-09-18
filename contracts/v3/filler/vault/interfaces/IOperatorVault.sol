@@ -45,7 +45,8 @@ interface IOperatorVault {
   event HighWaterMarkUpdated(uint256 markWad);
   event NavSettled(uint256 nav, uint256 timestamp);
   event OperatorSet(address indexed account, address indexed operator, bool approved);
-  event Paused(address indexed guardian);
+  /// @param account The guardian, or whoever ran the timed-out emergency exit.
+  event Paused(address indexed account);
   event Unpaused(address indexed guardian);
   event TokenSwept(address indexed token, address indexed to, uint256 amount);
   event ETHSwept(address indexed to, uint256 amount);
@@ -93,9 +94,10 @@ interface IOperatorVault {
     external;
 
   /// @notice Last-resort in-kind redeem when the risk signer cannot attest.
-  ///         Vault must already be paused. `emergencyExitTimeout` must have
-  ///         elapsed since the epoch closed. Pays live free balances,
-  ///         including unattested surplus. Anyone may call. Attested
+  ///         `emergencyExitTimeout` must have elapsed since the epoch closed.
+  ///         Pauses the vault if the guardian has not already, then pays live
+  ///         free balances, including unattested surplus. Anyone may call, so
+  ///         a silent operator cannot lock converted capital. Attested
   ///         settlement while paused also pays live, so a hostile risk key
   ///         cannot pre-settle a partial epoch at zero and block this path.
   ///         The adapter recall is best-effort and this path never calls the

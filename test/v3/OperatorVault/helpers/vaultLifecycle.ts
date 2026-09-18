@@ -58,8 +58,7 @@ export async function seedShares(
   return { depositId, amount }
 }
 
-/** Pause and wait out `emergencyExitTimeout`, the two preconditions every
- *  `settleRedeemEmergencyInKind` call shares. */
+/** Guardian pause, then wait out `emergencyExitTimeout`. */
 export async function armEmergencyExit(ctx: DeployedVault): Promise<void> {
   await ctx.vault.connect(ctx.guardian).pause()
   await time.increase(await ctx.vault.emergencyExitTimeout())
