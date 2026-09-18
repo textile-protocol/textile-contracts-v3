@@ -155,6 +155,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     address indexed controller, address indexed owner, uint256 indexed requestId, address sender, uint256 shares
   );
   event EpochClosed(uint256 indexed epochId, bool isDeposit, uint256 units);
+  /// @dev `price` is the risk-signed corridor price the epoch converted at.
+  ///      An empty epoch converts nothing and reports `(0, 0, 0)`.
   event DepositEpochProcessed(uint256 indexed epochId, uint256 assets, uint256 shares, uint256 price);
   event DepositEpochVoided(uint256 indexed epochId);
   event RedeemEpochSettled(uint256 indexed epochId, uint256 shares, uint256 settlementOut, uint256 corridorOut);
@@ -301,7 +303,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     Epoch storage epoch = _closedEpoch(epochId, true);
     if (epoch.assets == 0) {
       epoch.state = EpochState.Processed;
-      emit DepositEpochProcessed(epochId, 0, 0, attestation.corridorAssetPrice);
+      // Price 0, not `attestation.corridorAssetPrice`: this branch returns
+      // before `verifyAttestation`, so the struct is unsigned caller input and
+      // anyone could emit any price into the log (audit I-01). Nothing
+      // converted here, so there is no price to report anyway.
+      emit DepositEpochProcessed(epochId, 0, 0, 0);
       return;
     }
 
