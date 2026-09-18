@@ -14,12 +14,7 @@ import {
   usdt,
 } from './fixtures/operatorVault.fixture'
 import type { DeployedVault } from './fixtures/operatorVault.fixture'
-import {
-  closeAndProcessDeposit,
-  closeAndSettleRedeem,
-  closeRedeem,
-  seedShares,
-} from './helpers/vaultLifecycle'
+import { closeAndProcessDeposit, closeAndSettleRedeem, closeRedeem, seedShares } from './helpers/vaultLifecycle'
 import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
 
 describe('OperatorVault — management fee', function () {
@@ -29,8 +24,7 @@ describe('OperatorVault — management fee', function () {
 
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(redeemId)
+    await closeRedeem(ctx, redeemId)
     await ctx.vault.connect(ctx.guardian).pause()
     await time.increase(365 * DAY)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)

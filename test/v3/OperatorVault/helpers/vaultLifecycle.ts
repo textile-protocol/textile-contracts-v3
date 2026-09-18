@@ -70,7 +70,18 @@ export async function closeRedeem(
 ): Promise<bigint> {
   const id = epochId ?? (await ctx.vault.currentRedeemEpochId())
   await time.increase(DAY)
-  await ctx.vault.closeRedeemEpoch(id)
+  // The operator closes on its own schedule; a third party would also have
+  // to wait out `valuationTimeout` (audit v0.2 L-02) — see `closeRedeemAsAnyone`.
+  await ctx.vault.connect(ctx.operatorAdmin).closeRedeemEpoch(id)
+  return id
+}
+
+/** The backstop path: nobody with an operator key shows up, and a third
+ *  party closes once `redemptionEpochDuration + valuationTimeout` has run. */
+export async function closeRedeemAsAnyone(ctx: DeployedVault, epochId?: bigint): Promise<bigint> {
+  const id = epochId ?? (await ctx.vault.currentRedeemEpochId())
+  await time.increase((await ctx.vault.redemptionEpochDuration()) + (await ctx.vault.valuationTimeout()))
+  await ctx.vault.connect(ctx.other).closeRedeemEpoch(id)
   return id
 }
 

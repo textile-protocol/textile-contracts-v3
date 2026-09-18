@@ -83,6 +83,12 @@ interface IOperatorVault {
 
   function voidDepositEpoch(uint256 epochId) external;
 
+  /// @notice Close the open redeem epoch. Bumps the trading epoch (every
+  ///         signed order dies) and holds the vault close-only until the
+  ///         epoch settles. The operator admin and strategy signer may close
+  ///         at any time; anyone else only once the epoch has been open
+  ///         `redemptionEpochDuration + valuationTimeout` and
+  ///         `redemptionCloseCooldown` has passed since the last settle.
   function closeRedeemEpoch(uint256 epochId) external;
 
   /// @notice Settle a closed redeem epoch against a risk-signer attestation.

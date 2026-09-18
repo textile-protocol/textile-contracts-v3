@@ -31,6 +31,8 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
 contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, VaultErrors {
   using SafeERC20 for IERC20;
 
+  /// @dev Order matters: `claim` treats `Processed` and everything after it
+  ///      as claimable, so a new state goes before `Processed` unless it is.
   enum EpochState {
     None,
     Open,
@@ -286,11 +288,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     Epoch storage epoch = epochs[epochId];
     if (!epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
     if (block.timestamp < epoch.cutoff) revert VaultErrors.EpochNotReady();
-    epoch.state = EpochState.Closed;
-    epoch.closedAt = uint64(block.timestamp);
     if (currentDepositEpochId == epochId) currentDepositEpochId = 0;
     if (currentCorridorDepositEpochId == epochId) currentCorridorDepositEpochId = 0;
-    emit EpochClosed(epochId, true, epoch.assets);
+    _closeEpoch(epochId, epoch);
   }
 
   /// @inheritdoc IOperatorVault
@@ -381,21 +381,35 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @inheritdoc IOperatorVault
+  /// @dev Closing bumps the trading epoch and puts the vault in close-only
+  ///      mode until the epoch settles, so the trigger belongs to the
+  ///      operator. The admin and the strategy signer close whenever they
+  ///      like: no duration, no cooldown. Anyone else is the backstop for an
+  ///      inattentive operator and waits `valuationTimeout` on top of the
+  ///      duration, the same grace the operator gets to process a deposit
+  ///      epoch before it becomes voidable. Without that grace a single
+  ///      `minRedeemShares` holder could force a re-quote of the whole book
+  ///      every cycle (audit v0.2 L-02).
   function closeRedeemEpoch(uint256 epochId) external override {
     if (closedRedeemEpochId != 0) revert VaultErrors.RedeemEpochOutstanding();
     Epoch storage epoch = epochs[epochId];
     if (epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
-    if (!_durationElapsed(epoch.openedAt, redemptionEpochDuration)) revert VaultErrors.EpochNotReady();
-    if (lastRedeemSettledAt != 0 && !_durationElapsed(lastRedeemSettledAt, redemptionCloseCooldown)) {
-      revert VaultErrors.CloseCooldownActive();
+    if (msg.sender != _roles.operatorAdmin && msg.sender != _roles.strategySigner) {
+      uint256 publicWindow;
+      // Both terms passed `_requireSafeDuration`, so the sum fits.
+      unchecked {
+        publicWindow = redemptionEpochDuration + valuationTimeout;
+      }
+      if (!_durationElapsed(epoch.openedAt, publicWindow)) revert VaultErrors.EpochNotReady();
+      if (lastRedeemSettledAt != 0 && !_durationElapsed(lastRedeemSettledAt, redemptionCloseCooldown)) {
+        revert VaultErrors.CloseCooldownActive();
+      }
     }
 
-    epoch.state = EpochState.Closed;
-    epoch.closedAt = uint64(block.timestamp);
     closedRedeemEpochId = epochId;
     if (currentRedeemEpochId == epochId) currentRedeemEpochId = 0;
     _bumpTradingEpoch();
-    emit EpochClosed(epochId, false, epoch.assets);
+    _closeEpoch(epochId, epoch);
   }
 
   /// @inheritdoc IOperatorVault
@@ -497,9 +511,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     if (units == 0) revert VaultErrors.NothingToClaim();
 
     Epoch storage epoch = epochs[requestId];
-    if (epoch.state != EpochState.Processed && epoch.state != EpochState.Voided && epoch.state != EpochState.Settled) {
-      revert VaultErrors.EpochNotClaimable();
-    }
+    if (epoch.state < EpochState.Processed) revert VaultErrors.EpochNotClaimable();
 
     requestClaimed[controller][requestId] = true;
     requestUnits[controller][requestId] = 0;
@@ -857,6 +869,14 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     epoch.openedAt = uint64(block.timestamp);
     if (cutoff != 0) epoch.cutoff = cutoff;
     if (inCorridor) epoch.inCorridor = true;
+  }
+
+  /// @dev Shared tail of both closes. Bytes matter here: see
+  ///      `OperatorVault.Size.test.ts`.
+  function _closeEpoch(uint256 id, Epoch storage epoch) private {
+    epoch.state = EpochState.Closed;
+    epoch.closedAt = uint64(block.timestamp);
+    emit EpochClosed(id, epoch.isDeposit, epoch.assets);
   }
 
   function _finishRedeemSettle(

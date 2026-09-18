@@ -10,7 +10,7 @@ import {
   usdt,
   cngn,
 } from './fixtures/operatorVault.fixture'
-import { seedShares } from './helpers/vaultLifecycle'
+import { closeRedeem, seedShares } from './helpers/vaultLifecycle'
 import { signVaultEnvelope } from './helpers/vaultSignatures'
 
 describe('OperatorVault — ERC-1271', function () {
@@ -98,8 +98,7 @@ describe('OperatorVault — ERC-1271', function () {
     const ctx = await funded()
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(redeemId)
+    await closeRedeem(ctx, redeemId)
     const now = (await ethers.provider.getBlock('latest'))!.timestamp
     const epoch = await ctx.vault.tradingEpoch()
 
@@ -135,8 +134,7 @@ describe('OperatorVault — ERC-1271', function () {
     await ctx.corridor.mint(await ctx.vault.getAddress(), cngn(100n))
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(redeemId)
+    await closeRedeem(ctx, redeemId)
     const now = (await ethers.provider.getBlock('latest'))!.timestamp
     const epoch = await ctx.vault.tradingEpoch()
 

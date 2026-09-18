@@ -3,7 +3,7 @@ import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
-import { closeAndProcessDeposit, seedShares } from './helpers/vaultLifecycle'
+import { closeAndProcessDeposit, closeRedeem, seedShares } from './helpers/vaultLifecycle'
 import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
 
 describe('OperatorVault — remaining edges', function () {
@@ -53,8 +53,7 @@ describe('OperatorVault — remaining edges', function () {
       ctx.vault.connect(ctx.lp1).claim(redeemId, ctx.lp1.address, ctx.lp1.address)
     ).to.be.revertedWithCustomError(ctx.vault, 'EpochNotClaimable')
 
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(redeemId)
+    await closeRedeem(ctx, redeemId)
     const ratt = await freshAttestation(ctx.vault, redeemId, PRICE_1)
     const rsig = await signAttestation(ctx.harness, ctx.risk, ratt)
     await ctx.vault.settleRedeemEpoch(redeemId, ratt, rsig)
@@ -145,8 +144,7 @@ describe('OperatorVault — remaining edges', function () {
     await ctx.corridor.mint(await ctx.vault.getAddress(), corridorHeld)
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(redeemId)
+    await closeRedeem(ctx, redeemId)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
     await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig)).to.be.revertedWithCustomError(
@@ -173,8 +171,7 @@ describe('OperatorVault — remaining edges', function () {
     await ctx.corridor.mint(await ctx.vault.getAddress(), corridorHeld)
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(600n), ctx.lp1.address, ctx.lp1.address)
     const redeemId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(redeemId)
+    await closeRedeem(ctx, redeemId)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
     await expect(ctx.vault.settleRedeemEpoch(redeemId, att, sig))

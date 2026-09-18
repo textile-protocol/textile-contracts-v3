@@ -3,7 +3,7 @@ import { expect } from 'chai'
 
 import { nav } from '../../../constants/src/operatorVaultMath'
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
-import { closeAndProcessDeposit, seedShares } from './helpers/vaultLifecycle'
+import { closeAndProcessDeposit, closeRedeem, seedShares } from './helpers/vaultLifecycle'
 import { freshAttestation, signAttestation } from './helpers/vaultSignatures'
 
 async function seededVault() {
@@ -26,8 +26,7 @@ describe('OperatorVault — redemptions', function () {
     const shares = usdt(400n)
     await ctx.vault.connect(ctx.lp1).requestRedeem(shares, ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     expect(await ctx.vault.closeOnly()).to.equal(true)
 
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
@@ -45,12 +44,17 @@ describe('OperatorVault — redemptions', function () {
     const ctx = await seededVault()
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(200n), ctx.lp1.address, ctx.lp1.address)
     const first = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(first)
+    await closeRedeem(ctx, first)
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(200n), ctx.lp1.address, ctx.lp1.address)
     const second = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
+    // Past the duration and the grace: only the outstanding epoch blocks a
+    // third party now, and it blocks the operator too.
+    await time.increase(2 * DAY)
     await expect(ctx.vault.closeRedeemEpoch(second)).to.be.revertedWithCustomError(
+      ctx.vault,
+      'RedeemEpochOutstanding'
+    )
+    await expect(ctx.vault.connect(ctx.operatorAdmin).closeRedeemEpoch(second)).to.be.revertedWithCustomError(
       ctx.vault,
       'RedeemEpochOutstanding'
     )
@@ -73,8 +77,7 @@ describe('OperatorVault — redemptions', function () {
     await ctx.corridor.mint(await ctx.vault.getAddress(), extra)
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     await ctx.corridor.mint(await ctx.vault.getAddress(), extra)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
@@ -91,8 +94,7 @@ describe('OperatorVault — redemptions', function () {
     await seedShares(ctx, ctx.lp1, usdt(1_000n))
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
 
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     const extraS = usdt(500n)
@@ -128,8 +130,7 @@ describe('OperatorVault — redemptions', function () {
 
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     let epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
     await ctx.vault.settleRedeemEpoch(epochId, att, sig)
@@ -138,8 +139,7 @@ describe('OperatorVault — redemptions', function () {
 
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(400n), ctx.lp1.address, ctx.lp1.address)
     epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     const second = await freshAttestation(ctx.vault, epochId, PRICE_1)
     const secondSig = await signAttestation(ctx.harness, ctx.risk, second)
     await ctx.vault.settleRedeemEpoch(epochId, second, secondSig)
@@ -170,8 +170,7 @@ describe('OperatorVault — redemptions', function () {
     await seedShares(ctx, ctx.lp1, usdt(1_000n))
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
     await expect(ctx.vault.settleRedeemEpoch(epochId, att, sig)).to.be.revertedWithCustomError(
@@ -193,8 +192,7 @@ describe('OperatorVault — redemptions', function () {
     await seedShares(ctx, ctx.lp1, usdt(1_000n))
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(500n), ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     await ctx.settlement.mint(await ctx.vault.getAddress(), usdt(50n))
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
@@ -213,8 +211,7 @@ describe('OperatorVault — redemptions', function () {
     const ctx = await seededVault()
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     await ctx.vault.connect(ctx.guardian).pause()
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
@@ -239,8 +236,7 @@ describe('OperatorVault — redemptions', function () {
     const shares = usdt(500n)
     await ctx.vault.connect(ctx.lp1).requestRedeem(shares, ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     const supply = await ctx.vault.totalSupply()
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
@@ -279,8 +275,7 @@ describe('OperatorVault — redemptions', function () {
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(333n), ctx.lp1.address, ctx.lp1.address)
     await ctx.vault.connect(ctx.lp2).requestRedeem(usdt(333n), ctx.lp2.address, ctx.lp2.address)
     const epochId = await ctx.vault.currentRedeemEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeRedeemEpoch(epochId)
+    await closeRedeem(ctx, epochId)
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     const sig = await signAttestation(ctx.harness, ctx.risk, att)
     await ctx.vault.settleRedeemEpoch(epochId, att, sig)
