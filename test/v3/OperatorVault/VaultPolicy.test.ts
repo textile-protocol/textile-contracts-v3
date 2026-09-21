@@ -44,6 +44,7 @@ async function validConfig(ctx: Awaited<ReturnType<typeof deployOperatorVault>>)
     minRedeemShares: usdt(1n),
     yieldAdapter: ethers.ZeroAddress,
     minLiquidSettlement: 0n,
+    perfFloorEnabled: false,
   }
 }
 

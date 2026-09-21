@@ -90,27 +90,35 @@ library VaultPolicy {
     corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
   }
 
+  /// @notice One fee checkpoint's inputs. A zero `priceWad` skips the performance leg.
+  struct Checkpoint {
+    uint256 supply;
+    uint256 elapsed;
+    uint256 freeSettlement;
+    uint256 freeCorridor;
+    uint256 priceWad;
+    uint256 markWad;
+    uint256 managementFeeWad;
+    uint256 performanceFeeWad;
+  }
+
   /// @notice Both fee legs for one checkpoint, each split with the protocol on its own terms.
-  /// @param navAssets Attested NAV, never a live read; zero skips the performance leg.
-  function checkpointAccrual(
-    uint256 supply,
-    uint256 elapsed,
-    uint256 navAssets,
-    uint256 markWad,
-    uint256 managementFeeWad,
-    uint256 performanceFeeWad
-  )
+  ///         Delegatecalled: writes the basket mark and logs it; the absolute mark is returned.
+  function checkpointAccrual(VaultTypes.BasketMark storage basket, Checkpoint memory c)
     external
-    view
     returns (uint256 operatorShares, uint256 protocolShares, address protocolRecipient, uint256 newMarkWad)
   {
     // Performance is charged net of the management leg.
-    uint256 mgmt = VaultLib.feeShares(supply, managementFeeWad, elapsed);
-    newMarkWad = supply == 0 ? VaultLib.WAD : markWad;
+    uint256 mgmt = VaultLib.feeShares(c.supply, c.managementFeeWad, c.elapsed);
     uint256 perf;
-    if (navAssets != 0) {
-      perf = VaultLib.performanceFeeShares(navAssets, supply + mgmt, newMarkWad, performanceFeeWad);
-      newMarkWad = VaultLib.markAfter(navAssets, supply + mgmt + perf, newMarkWad);
+    if (c.supply == 0) {
+      // Empty: both marks reset.
+      newMarkWad = VaultLib.WAD;
+      _storeMarks(basket, true, 0, 0, 0, c.markWad, newMarkWad);
+    } else if (c.priceWad == 0) {
+      newMarkWad = c.markWad;
+    } else {
+      (perf, newMarkWad) = _performanceLeg(basket, c, c.supply + mgmt);
     }
     if (mgmt + perf == 0) return (0, 0, address(0), newMarkWad);
     uint256 mgmtShareWad;
@@ -120,6 +128,94 @@ library VaultPolicy {
     (uint256 perfOperator, uint256 perfProtocol) = VaultLib.splitFee(perf, perfShareWad);
     operatorShares = mgmtOperator + perfOperator;
     protocolShares = mgmtProtocol + perfProtocol;
+  }
+
+  /// @dev Charges NAV over the revalued basket, capped at NAV over the absolute mark when the
+  ///      floor is on. `supply` is post-management.
+  function _performanceLeg(VaultTypes.BasketMark storage basket, Checkpoint memory c, uint256 supply)
+    private
+    returns (uint256 perf, uint256 newMarkWad)
+  {
+    // A fresh basket is the inventory itself, so the first priced checkpoint charges nothing.
+    bool fresh = basket.settlementWad == 0 && basket.corridorWad == 0;
+    (uint256 basketS, uint256 basketC) = fresh
+      ? (c.freeSettlement, c.freeCorridor)
+      : (VaultLib.perShareTotal(basket.settlementWad, supply), VaultLib.perShareTotal(basket.corridorWad, supply));
+    (uint8 sDec, uint8 cDec) = _decimals(c.freeCorridor != 0 || basketC != 0);
+    uint256 navNow = VaultLib.nav(c.freeSettlement, c.freeCorridor, c.priceWad, sDec, cDec);
+    uint256 basketValue = VaultLib.nav(basketS, basketC, c.priceWad, sDec, cDec);
+    uint256 floorValue = navNow > basketValue ? _floorValue(c.markWad, supply) : 0;
+    uint256 gain = VaultLib.chargeableGain(navNow, basketValue, floorValue);
+
+    perf = VaultLib.performanceFeeShares(navNow, supply, gain, c.performanceFeeWad);
+    uint256 supplyAfter = supply + perf;
+    newMarkWad = VaultLib.markAfter(navNow, supplyAfter, c.markWad);
+
+    // Charged in full, the basket becomes the inventory. Floored, the charged slice joins the
+    // settlement leg and the rest stays owed. No mint, no move.
+    if (floorValue > basketValue) basketS += gain;
+    else (basketS, basketC) = (c.freeSettlement, c.freeCorridor);
+    _storeMarks(basket, fresh || perf != 0, basketS, basketC, supplyAfter, c.markWad, newMarkWad);
+  }
+
+  /// @notice Fold a processed deposit into the basket leg it arrived in: the basket's value grows
+  ///         by exactly the epoch's value, so the new shares carry none of the gain deferred before them.
+  /// @param supply Supply before `shares` were minted.
+  function absorbDeposit(
+    VaultTypes.BasketMark storage basket,
+    uint256 markWad,
+    uint256 supply,
+    uint256 shares,
+    uint256 assets,
+    bool inCorridor
+  ) external {
+    uint256 basketS;
+    uint256 basketC;
+    if (basket.settlementWad == 0 && basket.corridorWad == 0) {
+      // A fresh basket takes the whole post-mint inventory.
+      IOperatorVault self = IOperatorVault(address(this));
+      (basketS, basketC) = (self.freeSettlement(), self.freeCorridor());
+    } else {
+      basketS = VaultLib.perShareTotal(basket.settlementWad, supply) + (inCorridor ? 0 : assets);
+      basketC = VaultLib.perShareTotal(basket.corridorWad, supply) + (inCorridor ? assets : 0);
+    }
+    _storeMarks(basket, true, basketS, basketC, supply + shares, markWad, markWad);
+  }
+
+  /// @dev Stores `units` of each leg per share over `supply` when `rebase`, and logs all three
+  ///      marks when any of them moved.
+  function _storeMarks(
+    VaultTypes.BasketMark storage basket,
+    bool rebase,
+    uint256 unitsS,
+    uint256 unitsC,
+    uint256 supply,
+    uint256 markWad,
+    uint256 newMarkWad
+  ) private {
+    (uint256 s, uint256 k) = (basket.settlementWad, basket.corridorWad);
+    bool moved;
+    if (rebase) {
+      (uint256 nextS, uint256 nextK) =
+        (VaultLib.basketPerShare(unitsS, supply), VaultLib.basketPerShare(unitsC, supply));
+      moved = nextS != s || nextK != k;
+      if (moved) (basket.settlementWad, basket.corridorWad) = (nextS, nextK);
+      (s, k) = (nextS, nextK);
+    }
+    if (moved || newMarkWad != markWad) emit IOperatorVault.MarkUpdated(newMarkWad, s, k);
+  }
+
+  /// @dev Vault immutables, read back rather than passed (33 vault bytes per read site) and only
+  ///      when a corridor leg exists, since `nav` ignores them otherwise.
+  function _decimals(bool corridorHeld) private view returns (uint8, uint8) {
+    if (!corridorHeld) return (0, 0);
+    IOperatorVault self = IOperatorVault(address(this));
+    return (self.settlementDecimals(), self.corridorDecimals());
+  }
+
+  /// @dev NAV the absolute mark stands for, or zero when the vault's floor is off.
+  function _floorValue(uint256 markWad, uint256 supply) private view returns (uint256) {
+    return IOperatorVault(address(this)).perfFloorEnabled() ? VaultLib.perShareTotal(markWad, supply) : 0;
   }
 
   /// @dev Under delegatecall `address(this)` is the vault. Read rather than passed in: an

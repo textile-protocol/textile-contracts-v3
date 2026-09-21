@@ -48,14 +48,48 @@ export async function closeAndProcessDeposit(
 export async function seedShares(
   ctx: DeployedVault,
   owner: SignerWithAddress,
-  amount: bigint = usdt(1_000n)
+  amount: bigint = usdt(1_000n),
+  price: bigint = PRICE_1
 ): Promise<{ depositId: bigint; amount: bigint }> {
   await ctx.vault
     .connect(owner)
     .requestDeposit(amount, owner.address, owner.address)
-  const depositId = await closeAndProcessDeposit(ctx)
+  const depositId = await closeAndProcessDeposit(ctx, undefined, price)
   await ctx.vault.connect(owner).claim(depositId, owner.address, owner.address)
   return { depositId, amount }
+}
+
+/** `seedShares` for the corridor asset, priced at `price`. */
+export async function seedCorridorShares(
+  ctx: DeployedVault,
+  owner: SignerWithAddress,
+  amount: bigint,
+  price: bigint = PRICE_1
+): Promise<bigint> {
+  await ctx.vault
+    .connect(owner)
+    .requestDepositCorridor(amount, owner.address, owner.address)
+  const depositId = await closeAndProcessDeposit(
+    ctx,
+    await ctx.vault.currentCorridorDepositEpochId(),
+    price
+  )
+  await ctx.vault.connect(owner).claim(depositId, owner.address, owner.address)
+  return depositId
+}
+
+/** Redeem, settle and claim every share each holder has, in order. */
+export async function exitAll(
+  ctx: DeployedVault,
+  holders: SignerWithAddress[]
+): Promise<void> {
+  for (const holder of holders) {
+    const held = await ctx.vault.balanceOf(holder.address)
+    if (held === 0n) continue
+    await ctx.vault.connect(holder).requestRedeem(held, holder.address, holder.address)
+    const id = await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId())
+    await ctx.vault.connect(holder).claim(id, holder.address, holder.address)
+  }
 }
 
 /** Guardian pause, then wait out `emergencyExitTimeout`. */

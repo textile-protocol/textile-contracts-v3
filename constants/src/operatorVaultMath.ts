@@ -12,6 +12,9 @@ export const YEAR = 365n * 24n * 60n * 60n
 export const EPOCH_NONCE_SHIFT = 128n
 
 const mulDiv = (a: bigint, b: bigint, c: bigint): bigint => (a * b) / c
+// Local rather than feeMath's: this file ships alone in the public contracts export.
+const mulDivCeil = (a: bigint, b: bigint, c: bigint): bigint =>
+  (a * b + c - 1n) / c
 
 /**
  * 10^n as a bigint, built from a string for the same reason `WAD` is: under
@@ -124,23 +127,44 @@ export function splitFee(
   return { operatorShares: shares - protocolShares, protocolShares }
 }
 
-/**
- * Mirrors VaultLib.performanceFeeShares. Shares to mint for `feeWad` of the
- * NAV sitting above `markWad`, minted against post-fee NAV so holders keep
- * exactly `1 - feeWad` of the gain.
- */
+/** Mirrors `VaultTypes.BasketMark`: WAD-scaled atomic units of each asset per share. */
+export interface BasketMark {
+  settlementWad: bigint
+  corridorWad: bigint
+}
+
+/** Mirrors VaultLib.chargeableGain: NAV above the higher of the two marks. */
+export function chargeableGain(
+  navNow: bigint,
+  basketValue: bigint,
+  absValue: bigint
+): bigint {
+  const bar = basketValue > absValue ? basketValue : absValue
+  return navNow > bar ? navNow - bar : 0n
+}
+
+/** Mirrors VaultLib.performanceFeeShares: `feeWad` of `gain`, minted against post-fee NAV. */
 export function performanceFeeShares(
   navAssets: bigint,
   supply: bigint,
-  markWad: bigint,
+  gain: bigint,
   feeWad: bigint
 ): bigint {
-  if (supply === 0n || feeWad === 0n) return 0n
-  const mark = mulDiv(markWad, supply, WAD)
-  if (navAssets <= mark) return 0n
-  const feeAssets = mulDiv(navAssets - mark, feeWad, WAD)
+  if (supply === 0n || feeWad === 0n || gain === 0n) return 0n
+  const feeAssets = mulDiv(gain, feeWad, WAD)
   if (feeAssets === 0n) return 0n
   return mulDiv(feeAssets, supply, navAssets - feeAssets)
+}
+
+/** Mirrors VaultLib.perShareTotal: a per-share WAD figure scaled out to `supply` shares. */
+export function perShareTotal(perShareWad: bigint, supply: bigint): bigint {
+  return mulDiv(perShareWad, supply, WAD)
+}
+
+/** Mirrors VaultLib.basketPerShare: `units` per share, WAD-scaled and rounded up. */
+export function basketPerShare(units: bigint, supply: bigint): bigint {
+  if (supply === 0n) return 0n
+  return mulDivCeil(units, WAD, supply)
 }
 
 /**
@@ -160,10 +184,10 @@ export function markAfter(
 
 /**
  * Mirrors OperatorVaultFactory.VERSION: the VaultInit layout the admin form and
- * deploy script encode, and the vault ABI the keeper drives. 3 is the first
- * whose epochs settle only against a dual-signed attestation.
+ * deploy script encode, and the vault ABI the keeper drives. 3 settles only
+ * against a dual-signed attestation; 4 charges the performance fee on the basket mark.
  */
-export const OPERATOR_VAULT_FACTORY_VERSION = 3
+export const OPERATOR_VAULT_FACTORY_VERSION = 4
 
 export function tradingNonce(epoch: bigint, counter: bigint): bigint {
   return (epoch << EPOCH_NONCE_SHIFT) | counter

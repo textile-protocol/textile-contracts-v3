@@ -107,18 +107,39 @@ library VaultLib {
     operatorShares = shares - protocolShares;
   }
 
-  /// @notice `feeWad` of the NAV above the mark, minted against post-fee NAV.
-  function performanceFeeShares(uint256 navAssets, uint256 supply, uint256 markWad, uint256 feeWad)
+  /// @notice NAV above the higher mark: the revalued basket strips FX on held inventory, the
+  ///         absolute mark (zero when the floor is off) defers gain while under the high.
+  function chargeableGain(uint256 navNow, uint256 basketValue, uint256 absValue)
     internal
     pure
     returns (uint256)
   {
-    if (supply == 0 || feeWad == 0) return 0;
-    uint256 mark = Math.mulDiv(markWad, supply, WAD);
-    if (navAssets <= mark) return 0;
-    uint256 feeAssets = Math.mulDiv(navAssets - mark, feeWad, WAD);
+    uint256 bar = Math.max(basketValue, absValue);
+    return navNow > bar ? navNow - bar : 0;
+  }
+
+  /// @notice `feeWad` of `gain`, minted against post-fee NAV so holders keep exactly `1 - feeWad`.
+  function performanceFeeShares(uint256 navAssets, uint256 supply, uint256 gain, uint256 feeWad)
+    internal
+    pure
+    returns (uint256)
+  {
+    if (supply == 0 || feeWad == 0 || gain == 0) return 0;
+    uint256 feeAssets = Math.mulDiv(gain, feeWad, WAD);
     if (feeAssets == 0) return 0;
     return Math.mulDiv(feeAssets, supply, navAssets - feeAssets);
+  }
+
+  /// @notice A per-share WAD figure scaled out to `supply` shares.
+  function perShareTotal(uint256 perShareWad, uint256 supply) internal pure returns (uint256) {
+    return Math.mulDiv(perShareWad, supply, WAD);
+  }
+
+  /// @notice `units` per share, WAD-scaled. Rounds up so `perShareTotal` reads back at least what
+  ///         was written.
+  function basketPerShare(uint256 units, uint256 supply) internal pure returns (uint256) {
+    if (supply == 0) return 0;
+    return Math.mulDiv(units, WAD, supply, Math.Rounding.Ceil);
   }
 
   /// @notice Never re-bases down, so a recovery is not charged twice; an empty vault resets to par.

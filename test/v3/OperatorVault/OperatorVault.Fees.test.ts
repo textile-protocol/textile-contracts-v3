@@ -14,7 +14,13 @@ import {
   usdt,
 } from './fixtures/operatorVault.fixture'
 import type { DeployedVault } from './fixtures/operatorVault.fixture'
-import { closeAndProcessDeposit, closeAndSettleRedeem, closeRedeem, seedShares } from './helpers/vaultLifecycle'
+import {
+  closeAndSettleRedeem,
+  closeRedeem,
+  exitAll,
+  seedCorridorShares,
+  seedShares,
+} from './helpers/vaultLifecycle'
 import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 describe('OperatorVault — management fee', function () {
@@ -155,7 +161,10 @@ describe('OperatorVault — management fee', function () {
 
     const elapsed = (await ctx.vault.lastFeeCheckpoint()) - before
     const mgmt = math.feeShares(supply, WAD / 50n, elapsed)
-    const perf = math.performanceFeeShares(navAssets, supply + mgmt, WAD, WAD / 5n)
+    // Net of the management leg: the mark is per share, so the minted
+    // management shares lift the bar by their share of the seed.
+    const gain = navAssets - math.perShareTotal(WAD, supply + mgmt)
+    const perf = math.performanceFeeShares(navAssets, supply + mgmt, gain, WAD / 5n)
     const expected =
       math.splitFee(mgmt, WAD / 10n).protocolShares + math.splitFee(perf, WAD / 4n).protocolShares
     expect(expected).to.be.gt(0)
@@ -198,12 +207,7 @@ describe('OperatorVault — management fee', function () {
 
       // Everyone ahead of the protocol recipient leaves: the LP, then the
       // operator's recipient. Each settle mints a fresh tail to both recipients.
-      for (const holder of [ctx.lp1, ctx.feeRecipient]) {
-        const held = await ctx.vault.balanceOf(holder.address)
-        await ctx.vault.connect(holder).requestRedeem(held, holder.address, holder.address)
-        const id = await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId())
-        await ctx.vault.connect(holder).claim(id, holder.address, holder.address)
-      }
+      await exitAll(ctx, [ctx.lp1, ctx.feeRecipient])
 
       const proto = ctx.protocolFeeRecipient
       const held = await ctx.vault.balanceOf(proto.address)
@@ -366,11 +370,15 @@ describe('OperatorVault — management fee', function () {
 })
 
 describe('OperatorVault — performance fee', function () {
-  const PERF = WAD / 5n // 20% of the gain above the mark
+  const PERF = WAD / 5n // 20% of the chargeable gain
   const SEED = usdt(1_000_000n)
+  const SETTLEMENT_DECIMALS = 6
+  const CORRIDOR_DECIMALS = 18
 
-  /** A vault holding `SEED`, no management fee, mark sitting at par. */
-  async function seeded(extras: Record<string, bigint> = {}): Promise<DeployedVault> {
+  /** A vault holding `SEED`, no management fee, both marks sitting at par. */
+  async function seeded(
+    extras: { perfFloorEnabled?: boolean; minDepositCorridor?: bigint } = {}
+  ): Promise<DeployedVault> {
     const ctx = await deployOperatorVault({
       performanceFeeWad: PERF,
       minRedeemShares: usdt(1n),
@@ -380,8 +388,14 @@ describe('OperatorVault — performance fee', function () {
     return ctx
   }
 
-  /** Hand the vault settlement it did not earn from a deposit. The vault reads
-   *  its own balance for NAV, so this is a gain as far as the fee is concerned. */
+  /** `seeded`, plus a matching corridor deposit at par: a 50/50 book of 2M. */
+  async function fiftyFifty(perfFloorEnabled: boolean): Promise<DeployedVault> {
+    const ctx = await seeded({ minDepositCorridor: cngn(1n), perfFloorEnabled })
+    await seedCorridorShares(ctx, ctx.lp1, cngn(1_000_000n))
+    return ctx
+  }
+
+  /** Settlement the vault did not get from a deposit: a gain, as the fee sees it. */
   async function gain(ctx: DeployedVault, amount: bigint): Promise<void> {
     await ctx.settlement.mint(await ctx.vault.getAddress(), amount)
   }
@@ -392,15 +406,63 @@ describe('OperatorVault — performance fee', function () {
     await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId(), price)
   }
 
-  it('starts the mark at par and charges nothing before a gain', async function () {
+  /** Performance shares minted so far, both recipients together. */
+  async function perfMinted(ctx: DeployedVault): Promise<bigint> {
+    const [operator, protocol] = await Promise.all([
+      ctx.vault.balanceOf(ctx.feeRecipient.address),
+      ctx.vault.balanceOf(ctx.protocolFeeRecipient.address),
+    ])
+    return operator + protocol
+  }
+
+  async function basketOf(ctx: DeployedVault): Promise<math.BasketMark> {
+    const mark = await ctx.vault.basketMark()
+    return { settlementWad: mark.settlementWad, corridorWad: mark.corridorWad }
+  }
+
+  /** What the next priced checkpoint at `price` would see and mint, from the vault's own state. */
+  async function outlook(ctx: DeployedVault, price: bigint) {
+    const [supply, freeS, freeC, basket, floor, markWad] = await Promise.all([
+      ctx.vault.totalSupply(),
+      ctx.vault.freeSettlement(),
+      ctx.vault.freeCorridor(),
+      basketOf(ctx),
+      ctx.vault.perfFloorEnabled(),
+      ctx.vault.highWaterMarkWad(),
+    ])
+    const navNow = math.nav(freeS, freeC, price, SETTLEMENT_DECIMALS, CORRIDOR_DECIMALS)
+    const basketValue = math.nav(
+      math.perShareTotal(basket.settlementWad, supply),
+      math.perShareTotal(basket.corridorWad, supply),
+      price,
+      SETTLEMENT_DECIMALS,
+      CORRIDOR_DECIMALS
+    )
+    const basketGain = navNow > basketValue ? navNow - basketValue : 0n
+    const absValue = floor ? math.perShareTotal(markWad, supply) : 0n
+    const chargeable = math.chargeableGain(navNow, basketValue, absValue)
+    return {
+      supply,
+      navNow,
+      basketGain,
+      chargeable,
+      shares: math.performanceFeeShares(navNow, supply, chargeable, PERF),
+      // NAV net of the fee still owed on the basket gain: what the holders keep between them.
+      attributable: navNow - (basketGain * PERF) / WAD,
+    }
+  }
+
+  it('starts both marks at par and charges nothing before a gain', async function () {
     const ctx = await seeded()
     await checkpoint(ctx)
 
-    expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(0)
+    expect(await perfMinted(ctx)).to.equal(0)
     expect(await ctx.vault.highWaterMarkWad()).to.equal(WAD)
+    // The seed deposit set the basket: one settlement atom per share, no corridor.
+    expect(await basketOf(ctx)).to.deep.equal({ settlementWad: WAD, corridorWad: 0n })
   })
 
-  it('takes its cut of the gain above the mark, and leaves the rest to the LP', async function () {
+  it('takes its cut of a settlement gain, leaves the LP 80% of it, and rebases the basket', async function () {
     const ctx = await seeded()
     const supply = await ctx.vault.totalSupply()
     await gain(ctx, usdt(100_000n))
@@ -410,18 +472,26 @@ describe('OperatorVault — performance fee', function () {
 
     // The performance leg is split with the protocol on the same terms as the
     // management leg, so the operator's recipient sees its share of the whole.
-    const total = math.performanceFeeShares(navAssets, supply, WAD, PERF)
+    const total = math.performanceFeeShares(navAssets, supply, usdt(100_000n), PERF)
     const { operatorShares } = math.splitFee(total, PROTOCOL_FEE_SHARE_WAD)
     expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(operatorShares)
+    expect(await perfMinted(ctx)).to.equal(total)
 
     // The whole point of minting against post-fee NAV: the LP keeps exactly
     // 80% of the 100k gain, not 80%/(1+20%) of it. Dilution is the same total
     // either way — how the fee is split does not change what the LP bears.
     const lpValue = (SEED * navAssets) / (supply + total)
     expect(lpValue).to.be.closeTo(SEED + usdt(80_000n), usdt(1n))
+
+    // Charged in full, the basket is the post-fee inventory per share.
+    expect(await basketOf(ctx)).to.deep.equal({
+      settlementWad: math.basketPerShare(navAssets, supply + total),
+      corridorWad: 0n,
+    })
+    expect((await outlook(ctx, PRICE_1)).chargeable).to.equal(0)
   })
 
-  it('emits the mark when it moves, and only then', async function () {
+  it('emits the marks when they move, and only then', async function () {
     const ctx = await seeded()
     await gain(ctx, usdt(100_000n))
     const settle = async () => {
@@ -430,9 +500,25 @@ describe('OperatorVault — performance fee', function () {
       const att = await freshAttestation(ctx.vault, id, PRICE_1)
       return ctx.vault.settleRedeemEpoch(id, att, ...(await attestationSignatures(ctx, att)))
     }
-    await expect(settle()).to.emit(ctx.vault, 'HighWaterMarkUpdated')
+    await expect(settle()).to.emit(ctx.vault, 'MarkUpdated')
     expect(await ctx.vault.highWaterMarkWad()).to.be.gt(WAD)
-    await expect(settle()).to.not.emit(ctx.vault, 'HighWaterMarkUpdated')
+    await expect(settle()).to.not.emit(ctx.vault, 'MarkUpdated')
+  })
+
+  it('refuses an attestation that charges on a NAV its floors would not pay', async function () {
+    // Two colluding keys could sign a full NAV for the fee leg with near-zero floors for redeemers.
+    const ctx = await seeded()
+    await gain(ctx, usdt(100_000n))
+    await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1n), ctx.lp1.address, ctx.lp1.address)
+    const id = await closeRedeem(ctx, await ctx.vault.currentRedeemEpochId())
+    const att = await freshAttestation(ctx.vault, id, PRICE_1)
+    att.freeSettlement = 0n
+    const sigs = await attestationSignatures(ctx, att)
+    await expect(ctx.vault.settleRedeemEpoch(id, att, ...sigs)).to.be.revertedWithCustomError(
+      ctx.vault,
+      'InvalidAttestation'
+    )
+    expect(await perfMinted(ctx)).to.equal(0)
   })
 
   it('charges surplus that landed after the attestation when a paused exit pays live balances', async function () {
@@ -448,49 +534,231 @@ describe('OperatorVault — performance fee', function () {
     await gain(ctx, usdt(100_000n))
     await ctx.vault.settleRedeemEpoch(id, att, ...sigs)
 
-    const total = math.performanceFeeShares(await ctx.vault.freeSettlement() + (await ctx.vault.reservedSettlement()), supply, WAD, PERF)
+    const live = (await ctx.vault.freeSettlement()) + (await ctx.vault.reservedSettlement())
+    const total = math.performanceFeeShares(live, supply, live - SEED, PERF)
     const { operatorShares } = math.splitFee(total, PROTOCOL_FEE_SHARE_WAD)
     expect(operatorShares).to.be.gt(0)
     expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(operatorShares)
   })
 
-  it('raises the mark so a flat period is never charged twice', async function () {
+  it('raises the absolute mark so a flat period is never charged twice', async function () {
     const ctx = await seeded()
     await gain(ctx, usdt(100_000n))
     await checkpoint(ctx)
-    const afterFirst = await ctx.vault.balanceOf(ctx.feeRecipient.address)
+    const afterFirst = await perfMinted(ctx)
     expect(afterFirst).to.be.gt(0)
     expect(await ctx.vault.highWaterMarkWad()).to.be.gt(WAD)
 
     await checkpoint(ctx)
-    expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(afterFirst)
+    expect(await perfMinted(ctx)).to.equal(afterFirst)
   })
 
-  it('leaves the mark alone through a drawdown, so only the new peak is charged', async function () {
-    // Corridor inventory is what lets NAV fall here: the attested price is the
-    // only lever a test has on the value of what the vault holds.
-    const ctx = await seeded({ minDepositCorridor: cngn(1n) })
-    await ctx.corridor.mint(ctx.lp1.address, cngn(1_000_000n))
-    await ctx.corridor.connect(ctx.lp1).approve(await ctx.vault.getAddress(), cngn(1_000_000n))
-    await ctx.vault
-      .connect(ctx.lp1)
-      .requestDepositCorridor(cngn(1_000_000n), ctx.lp1.address, ctx.lp1.address)
-    await closeAndProcessDeposit(ctx, await ctx.vault.currentCorridorDepositEpochId(), PRICE_1)
+  for (const floor of [true, false]) {
+    describe(`with the floor ${floor ? 'on' : 'off'}`, function () {
+      it('charges nothing on an FX round trip over a fixed inventory', async function () {
+        // 50/50 book: +10%, par, +10%. The revalued basket moves with NAV, so nothing is performance.
+        const ctx = await fiftyFifty(floor)
+        const basket = await basketOf(ctx)
+        expect(basket.settlementWad).to.be.gt(0)
+        expect(basket.corridorWad).to.be.gt(0)
 
-    // Peak: corridor marked up 20%.
-    await checkpoint(ctx, (PRICE_1 * 12n) / 10n)
-    const atPeak = await ctx.vault.balanceOf(ctx.feeRecipient.address)
-    const peakMark = await ctx.vault.highWaterMarkWad()
-    expect(atPeak).to.be.gt(0)
+        for (const price of [(PRICE_1 * 11n) / 10n, PRICE_1, (PRICE_1 * 11n) / 10n]) {
+          await checkpoint(ctx, price)
+          expect(await perfMinted(ctx), `at price ${price}`).to.equal(0)
+          expect(await basketOf(ctx)).to.deep.equal(basket)
+        }
+        // The absolute mark still ratchets on the FX peak in both modes.
+        expect(await ctx.vault.highWaterMarkWad()).to.be.gt(WAD)
+      })
 
-    // Drawdown, back under the mark. Nothing accrues and the bar holds.
-    await checkpoint(ctx, (PRICE_1 * 9n) / 10n)
-    expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(atPeak)
-    expect(await ctx.vault.highWaterMarkWad()).to.equal(peakMark)
+      it(
+        floor
+          ? 'defers trading gain while the vault is under its high, then charges it once'
+          : 'charges trading gain under the high at once, and not again on the recovery',
+        async function () {
+          const ctx = await fiftyFifty(floor)
+          const basket = await basketOf(ctx)
+          const down = (PRICE_1 * 8n) / 10n
 
-    // Recovery to just under the old peak still owes nothing.
-    await checkpoint(ctx, (PRICE_1 * 115n) / 100n)
-    expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(atPeak)
+          // Corridor down 20% and 50k earned: gain over the basket, nothing over the absolute mark.
+          await gain(ctx, usdt(50_000n))
+          const before = await outlook(ctx, down)
+          expect(before.basketGain).to.equal(usdt(50_000n))
+          expect(before.chargeable).to.equal(floor ? 0n : usdt(50_000n))
+          await checkpoint(ctx, down)
+          expect(await perfMinted(ctx)).to.equal(before.shares)
+          if (floor) expect(await basketOf(ctx)).to.deep.equal(basket)
+
+          // Back to par. Floor on: at the high again, the deferred 50k is charged (less the
+          // sliver the token-sized redeem carried out). Floor off: the recovery is FX, not performance.
+          const recovered = await outlook(ctx, PRICE_1)
+          if (floor) {
+            expect(recovered.chargeable).to.equal(recovered.basketGain)
+            expect(recovered.chargeable).to.be.closeTo(usdt(50_000n), usdt(1n))
+          } else {
+            expect(recovered.shares).to.equal(0)
+          }
+          await checkpoint(ctx, PRICE_1)
+          expect(await perfMinted(ctx)).to.equal(before.shares + recovered.shares)
+
+          // Once, not twice.
+          await checkpoint(ctx, PRICE_1)
+          expect(await perfMinted(ctx)).to.equal(before.shares + recovered.shares)
+        }
+      )
+
+      it(
+        floor
+          ? 'charges what the floor allows and keeps the rest owed for later'
+          : 'charges the whole basket gain when the floor is off',
+        async function () {
+          const ctx = await fiftyFifty(floor)
+          const dip = (PRICE_1 * 97n) / 100n
+
+          // Basket gain 50k, absolute gain 20k: the corridor leg lost 30k on FX.
+          await gain(ctx, usdt(50_000n))
+          const first = await outlook(ctx, dip)
+          expect(first.basketGain).to.equal(usdt(50_000n))
+          expect(first.chargeable).to.equal(floor ? usdt(20_000n) : usdt(50_000n))
+          await checkpoint(ctx, dip)
+          expect(await perfMinted(ctx)).to.equal(first.shares)
+
+          // Flat: nothing mints. Floor on, the 30k still owed is untouched.
+          const flat = await outlook(ctx, dip)
+          expect(flat.basketGain).to.be.closeTo(floor ? usdt(30_000n) : 0n, usdt(1n))
+          expect(flat.shares).to.equal(0)
+          await checkpoint(ctx, dip)
+          expect(await perfMinted(ctx)).to.equal(first.shares)
+
+          // Back at par. Floor on: the remaining 30k is charged, unmoved by the corridor price
+          // because the charged slice sat on the settlement leg. Floor off: FX, not performance.
+          const cleared = await outlook(ctx, PRICE_1)
+          expect(cleared.chargeable).to.be.closeTo(floor ? usdt(30_000n) : 0n, usdt(1n))
+          await checkpoint(ctx, PRICE_1)
+          expect(await perfMinted(ctx)).to.equal(first.shares + cleared.shares)
+          expect((await outlook(ctx, PRICE_1)).shares).to.equal(0)
+        }
+      )
+
+      describe('deposits under an outstanding gain', function () {
+        /** A 50/50 book, corridor down 10%, 50k earned; deferred when the floor is on. */
+        async function outstanding() {
+          const ctx = await fiftyFifty(floor)
+          const down = (PRICE_1 * 9n) / 10n
+          await gain(ctx, usdt(50_000n))
+          await checkpoint(ctx, down)
+          const before = await outlook(ctx, down)
+          expect(before.basketGain).to.be.closeTo(floor ? usdt(50_000n) : 0n, usdt(1n))
+          expect(before.shares).to.equal(0)
+          return { ctx, down, before }
+        }
+
+        it('does not hand the entrant a slice of the gain to be charged for', async function () {
+          const { ctx, down, before } = await outstanding()
+          const charged = await perfMinted(ctx)
+
+          // A new LP buys half the vault at the depressed price.
+          await ctx.settlement.mint(ctx.lp2.address, before.navNow)
+          await seedShares(ctx, ctx.lp2, before.navNow, down)
+          const after = await outlook(ctx, down)
+          expect(after.attributable - before.attributable).to.equal(before.navNow)
+          // Same basket gain in atoms; a per-share basket left alone would have doubled it.
+          expect(after.basketGain).to.equal(before.basketGain)
+
+          // Corridor recovers past par. Floor on: the fee is 20% of the 50k earned before
+          // the entrant arrived, not of 100k. Floor off: it was charged before they arrived.
+          const up = (PRICE_1 * 105n) / 100n
+          const cleared = await outlook(ctx, up)
+          if (floor) expect(cleared.chargeable).to.equal(before.basketGain)
+          else expect(cleared.shares).to.equal(0)
+          await checkpoint(ctx, up)
+          expect(await perfMinted(ctx)).to.equal(charged + cleared.shares)
+
+          // Half the shares, half the dilution of a fee already owed when they bought in.
+          const lp2Value =
+            ((await ctx.vault.balanceOf(ctx.lp2.address)) * cleared.navNow) /
+            (cleared.supply + cleared.shares)
+          const half = (cleared.navNow - (cleared.chargeable * PERF) / WAD) / 2n
+          expect(lp2Value).to.be.closeTo(half, usdt(1n))
+        })
+
+        it('moves what the holders keep by exactly the deposit, in either asset', async function () {
+          const { ctx, down, before } = await outstanding()
+
+          await seedShares(ctx, ctx.lp2, usdt(300_000n), down)
+          const afterSettlement = await outlook(ctx, down)
+          expect(afterSettlement.attributable - before.attributable).to.equal(usdt(300_000n))
+
+          await seedCorridorShares(ctx, ctx.lp2, cngn(200_000n), down)
+          const afterCorridor = await outlook(ctx, down)
+          const corridorValue = math.nav(0n, cngn(200_000n), down, SETTLEMENT_DECIMALS, CORRIDOR_DECIMALS)
+          expect(afterCorridor.attributable - afterSettlement.attributable).to.equal(corridorValue)
+          expect(afterCorridor.basketGain).to.equal(before.basketGain)
+        })
+      })
+    })
+  }
+
+  describe('empty vault and bootstrap', function () {
+    /** Everyone out through a paused settle, so supply hits zero. */
+    async function emptyOut(ctx: DeployedVault): Promise<void> {
+      await ctx.vault.connect(ctx.guardian).pause()
+      await exitAll(ctx, [ctx.lp1, ctx.feeRecipient, ctx.protocolFeeRecipient])
+      expect(await ctx.vault.totalSupply()).to.equal(0)
+    }
+
+    it('resets both marks once the vault is empty', async function () {
+      const ctx = await seeded()
+      await gain(ctx, usdt(100_000n))
+      await checkpoint(ctx)
+      expect(await ctx.vault.highWaterMarkWad()).to.be.gt(WAD)
+      await emptyOut(ctx)
+
+      // The reset lands on the next checkpoint of any kind; this one is unpriced.
+      await expect(ctx.vault.connect(ctx.operatorAdmin).setFeeRecipient(ctx.other.address))
+        .to.emit(ctx.vault, 'MarkUpdated')
+        .withArgs(WAD, 0n, 0n)
+      expect(await ctx.vault.highWaterMarkWad()).to.equal(WAD)
+      expect(await basketOf(ctx)).to.deep.equal({ settlementWad: 0n, corridorWad: 0n })
+    })
+
+    it('initialises a fresh basket to the post-mint inventory and charges nothing on it', async function () {
+      const ctx = await seeded()
+      await emptyOut(ctx)
+      await ctx.vault.connect(ctx.guardian).unpause()
+      // Surplus in the empty vault becomes the first depositor's NAV (audit H-02), not performance.
+      await gain(ctx, usdt(10_000n))
+      await seedShares(ctx, ctx.lp2, usdt(100_000n))
+
+      expect(await basketOf(ctx)).to.deep.equal({
+        settlementWad: math.basketPerShare(usdt(110_000n), usdt(100_000n)),
+        corridorWad: 0n,
+      })
+      await ctx.vault.connect(ctx.lp2).requestRedeem(usdt(1n), ctx.lp2.address, ctx.lp2.address)
+      await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId())
+      expect(await perfMinted(ctx)).to.equal(0)
+    })
+
+    it('folds a deposit after a wind-down residue into the basket without charging', async function () {
+      // The last LP leaves; the fee's own dilution stays behind, under the floor.
+      const ctx = await seeded()
+      await gain(ctx, usdt(100_000n))
+      await checkpoint(ctx)
+      const residueFee = await perfMinted(ctx)
+      await exitAll(ctx, [ctx.lp1])
+      expect(await ctx.vault.totalSupply()).to.equal(residueFee)
+
+      await seedShares(ctx, ctx.lp2, usdt(100_000n))
+      expect((await outlook(ctx, PRICE_1)).shares).to.equal(0)
+      await ctx.vault.connect(ctx.lp2).requestRedeem(usdt(1n), ctx.lp2.address, ctx.lp2.address)
+      await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId())
+      expect(await perfMinted(ctx)).to.equal(residueFee)
+    })
+  })
+
+  it('fixes the floor at deploy', async function () {
+    const ctx = await deployOperatorVault({ perfFloorEnabled: true })
+    expect(await ctx.vault.perfFloorEnabled()).to.equal(true)
   })
 
   // The cap math itself is covered in VaultPolicy.test; this is the wiring

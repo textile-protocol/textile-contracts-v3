@@ -23,7 +23,7 @@ describe('OperatorVaultFactory', function () {
     ).to.equal(await vault.getAddress())
     expect(await factory.reactor()).to.equal(reactor)
     expect(await factory.permit2()).to.equal(permit2)
-    expect(await factory.VERSION()).to.equal(3)
+    expect(await factory.VERSION()).to.equal(4)
   })
 
   it('names the share token from the init and announces it in VaultDeployed', async function () {

@@ -105,18 +105,20 @@ describe('OperatorVault — deposits', function () {
     await expect(ctx.vault.processDepositEpoch(epochId, bad, ...sigs)).to.be.reverted
   })
 
-  it('rejects an attestation whose NAV does not match live inventory', async function () {
+  it('rejects an attestation whose NAV is not what its own floors are worth', async function () {
     const ctx = await deployOperatorVault()
     await ctx.vault.connect(ctx.lp1).requestDeposit(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     const epochId = await ctx.vault.currentDepositEpochId()
     await time.increase(DAY)
     await ctx.vault.closeDepositEpoch(epochId)
+    // The three signed numbers are one fact stated twice: a NAV the floors do
+    // not add up to is refused as malformed, whatever the live balances say.
     const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
     att.nav = att.nav + 1n
     const sigs = await attestationSignatures(ctx, att)
     await expect(ctx.vault.processDepositEpoch(epochId, att, ...sigs)).to.be.revertedWithCustomError(
       ctx.vault,
-      'InconsistentNav'
+      'InvalidAttestation'
     )
   })
 

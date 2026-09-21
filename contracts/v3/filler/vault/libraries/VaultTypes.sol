@@ -4,8 +4,15 @@ pragma solidity 0.8.30;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @notice Constructor / factory payloads for OperatorVault.
+/// @notice Constructor / factory payloads and shared storage structs for OperatorVault.
 library VaultTypes {
+  /// @notice Performance-fee basket mark: WAD-scaled atomic units of each asset per share. Full
+  ///         width, since a leg that saturated would understate the basket and re-charge it.
+  struct BasketMark {
+    uint256 settlementWad;
+    uint256 corridorWad;
+  }
+
   /// @notice One storage struct so the admin lifecycle can live in the linked library.
   struct Roles {
     address operatorAdmin;
@@ -58,6 +65,8 @@ library VaultTypes {
     uint256 minRedeemShares;
     bool enableYield;
     uint256 minLiquidSettlement;
+    /// @dev Performance fee only above the vault's all-time-high price per share.
+    bool perfFloorEnabled;
   }
 
   /// @notice Full immutable constructor payload.
@@ -91,5 +100,6 @@ library VaultTypes {
     uint256 minRedeemShares;
     address yieldAdapter;
     uint256 minLiquidSettlement;
+    bool perfFloorEnabled;
   }
 }

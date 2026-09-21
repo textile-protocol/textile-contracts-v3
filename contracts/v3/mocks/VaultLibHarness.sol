@@ -39,12 +39,28 @@ contract VaultLibHarness {
     return VaultLib.feeShares(supply, feeWad, elapsed);
   }
 
-  function performanceFeeShares(uint256 navAssets, uint256 supply, uint256 markWad, uint256 feeWad)
+  function chargeableGain(uint256 navNow, uint256 basketValue, uint256 absValue)
     external
     pure
     returns (uint256)
   {
-    return VaultLib.performanceFeeShares(navAssets, supply, markWad, feeWad);
+    return VaultLib.chargeableGain(navNow, basketValue, absValue);
+  }
+
+  function performanceFeeShares(uint256 navAssets, uint256 supply, uint256 gain, uint256 feeWad)
+    external
+    pure
+    returns (uint256)
+  {
+    return VaultLib.performanceFeeShares(navAssets, supply, gain, feeWad);
+  }
+
+  function perShareTotal(uint256 perShareWad, uint256 supply) external pure returns (uint256) {
+    return VaultLib.perShareTotal(perShareWad, supply);
+  }
+
+  function basketPerShare(uint256 units, uint256 supply) external pure returns (uint256) {
+    return VaultLib.basketPerShare(units, supply);
   }
 
   function markAfter(uint256 navAssets, uint256 supply, uint256 markWad) external pure returns (uint256) {

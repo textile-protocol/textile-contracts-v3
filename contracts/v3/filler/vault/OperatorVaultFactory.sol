@@ -17,7 +17,7 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
  *         authority over deployed vaults.
  */
 contract OperatorVaultFactory is IOperatorVaultFactory {
-  uint256 public constant VERSION = 3;
+  uint256 public constant VERSION = 4;
   uint256 public constant MAX_NAME_BYTES = 64;
   uint256 public constant MAX_SYMBOL_BYTES = 16;
   /// @notice The protocol may take at most half of either fee leg.
@@ -137,7 +137,8 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       minDepositCorridor: init.minDepositCorridor,
       minRedeemShares: init.minRedeemShares,
       yieldAdapter: adapter,
-      minLiquidSettlement: init.minLiquidSettlement
+      minLiquidSettlement: init.minLiquidSettlement,
+      perfFloorEnabled: init.perfFloorEnabled
     });
 
     vault = VaultDeployer.deploy(cfg, init.name, init.symbol);

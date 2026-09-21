@@ -8,6 +8,9 @@ import {
   feeShares,
   splitFee,
   performanceFeeShares,
+  chargeableGain,
+  perShareTotal,
+  basketPerShare,
   markAfter,
   wadToPercent,
   nav,
@@ -74,22 +77,37 @@ describe('operatorVaultMath (TS reference)', function () {
   })
 
   it('covers the performance-fee branches', function () {
-    // Off, or nothing outstanding to charge.
-    expect(performanceFeeShares(100n, 0n, WAD, WAD / 5n)).to.equal(0n)
-    expect(performanceFeeShares(100n, 100n, WAD, 0n)).to.equal(0n)
-    // At or under the mark.
-    expect(performanceFeeShares(100n, 100n, WAD, WAD / 5n)).to.equal(0n)
-    expect(performanceFeeShares(99n, 100n, WAD, WAD / 5n)).to.equal(0n)
+    // Off, or nothing to charge.
+    expect(performanceFeeShares(100n, 0n, 10n, WAD / 5n)).to.equal(0n)
+    expect(performanceFeeShares(100n, 100n, 10n, 0n)).to.equal(0n)
+    expect(performanceFeeShares(100n, 100n, 0n, WAD / 5n)).to.equal(0n)
     // A gain too small to round into a fee.
-    expect(performanceFeeShares(101n, 100n, WAD, WAD / 1000n)).to.equal(0n)
+    expect(performanceFeeShares(101n, 100n, 1n, WAD / 1000n)).to.equal(0n)
 
     // 20% of a 10% gain, minted against post-fee NAV so the holder keeps 80%
     // of it rather than 80%/(1+20%).
     const supply = 1_000_000n * WAD
     const navAssets = 1_100_000n * WAD
-    const minted = performanceFeeShares(navAssets, supply, WAD, WAD / 5n)
+    const minted = performanceFeeShares(navAssets, supply, 100_000n * WAD, WAD / 5n)
     const holderValue = (supply * navAssets) / (supply + minted)
     expect(holderValue).to.be.closeTo(1_080_000n * WAD, WAD)
+  })
+
+  it('charges the smaller of the two gains, and nothing under either mark', function () {
+    expect(chargeableGain(100n, 100n, 90n)).to.equal(0n) // at the basket
+    expect(chargeableGain(100n, 90n, 100n)).to.equal(0n) // at the absolute mark
+    expect(chargeableGain(100n, 110n, 90n)).to.equal(0n) // under the basket
+    expect(chargeableGain(100n, 90n, 95n)).to.equal(5n) // the floor binds
+    expect(chargeableGain(100n, 95n, 90n)).to.equal(5n) // the basket binds
+    expect(chargeableGain(100n, 90n, 90n)).to.equal(10n)
+  })
+
+  it('scales a basket leg between per-share and total form', function () {
+    expect(perShareTotal(WAD / 2n, 1_000n)).to.equal(500n)
+    expect(basketPerShare(500n, 1_000n)).to.equal(WAD / 2n)
+    expect(basketPerShare(500n, 0n)).to.equal(0n)
+    // Rounds up, so scaling back out never lands under what was written.
+    expect(basketPerShare(1n, 3n)).to.equal(WAD / 3n + 1n)
   })
 
   it('covers the mark branches', function () {

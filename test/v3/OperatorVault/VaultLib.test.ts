@@ -44,21 +44,40 @@ describe('VaultLib', function () {
     expect(await harness.feeShares(1000n, WAD / 4n, year)).to.equal(333n)
   })
 
-  it('matches the TS reference for the performance fee and the mark', async function () {
+  it('matches the TS reference for the performance fee and the marks', async function () {
     const { harness } = await deployOperatorVault()
     const supply = 1_000_000n * WAD
     const navAssets = 1_100_000n * WAD
 
-    for (const [n, sup, mark, fee] of [
-      [navAssets, supply, WAD, WAD / 5n],
-      [navAssets, supply, (WAD * 12n) / 10n, WAD / 5n], // under the mark
-      [navAssets, 0n, WAD, WAD / 5n],
-      [navAssets, supply, WAD, 0n],
+    for (const [n, sup, gain, fee] of [
+      [navAssets, supply, 100_000n * WAD, WAD / 5n],
+      [navAssets, supply, 0n, WAD / 5n], // nothing chargeable
+      [navAssets, 0n, 100_000n * WAD, WAD / 5n],
+      [navAssets, supply, 100_000n * WAD, 0n],
     ] as const) {
-      expect(await harness.performanceFeeShares(n, sup, mark, fee)).to.equal(
-        math.performanceFeeShares(n, sup, mark, fee)
+      expect(await harness.performanceFeeShares(n, sup, gain, fee)).to.equal(
+        math.performanceFeeShares(n, sup, gain, fee)
       )
     }
+
+    // The smaller of the two gains; nothing at or under either mark.
+    for (const [now, basket, abs] of [
+      [100n, 90n, 95n],
+      [100n, 95n, 90n],
+      [100n, 100n, 90n],
+      [100n, 90n, 100n],
+      [100n, 110n, 90n],
+    ] as const) {
+      expect(await harness.chargeableGain(now, basket, abs)).to.equal(
+        math.chargeableGain(now, basket, abs)
+      )
+    }
+
+    // A basket leg out to a supply and back per share.
+    expect(await harness.perShareTotal(WAD / 2n, 1_000n)).to.equal(math.perShareTotal(WAD / 2n, 1_000n))
+    expect(await harness.basketPerShare(500n, 1_000n)).to.equal(math.basketPerShare(500n, 1_000n))
+    expect(await harness.basketPerShare(1n, 3n)).to.equal(math.basketPerShare(1n, 3n))
+    expect(await harness.basketPerShare(500n, 0n)).to.equal(0n)
 
     // Ratchets up, never down; an empty vault re-bases to par.
     expect(await harness.markAfter(200n, 100n, WAD)).to.equal(2n * WAD)

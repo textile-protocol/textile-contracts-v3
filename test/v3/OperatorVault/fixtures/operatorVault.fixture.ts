@@ -89,6 +89,9 @@ export interface VaultInitOverrides {
   maxOrderInputCorridor?: bigint
   enableYield?: boolean
   minLiquidSettlement?: bigint
+  /** Floor the performance fee at the all-time-high price per share. Defaults
+   *  to off, the admin form's default. */
+  perfFloorEnabled?: boolean
   /** Factory-level protocol cut of the management fee, WAD. Defaults to the
    *  10% Textile deploys with. 0n deploys a factory that takes nothing. */
   protocolManagementShareWad?: bigint
@@ -148,6 +151,7 @@ export function defaultInit(s: VaultSigners, extras: VaultInitOverrides = {}) {
     minRedeemShares: extras.minRedeemShares ?? usdt(100n),
     enableYield: extras.enableYield ?? false,
     minLiquidSettlement: extras.minLiquidSettlement ?? 0n,
+    perfFloorEnabled: extras.perfFloorEnabled ?? false,
   }
 }
 

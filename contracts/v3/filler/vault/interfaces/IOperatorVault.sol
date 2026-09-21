@@ -38,7 +38,8 @@ interface IOperatorVault {
   /// @notice The earliest event on a vault names the deploy-time floor as `previous`.
   event MinLiquidSettlementUpdated(uint256 previous, uint256 current);
   event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
-  event HighWaterMarkUpdated(uint256 markWad);
+  /// @notice A performance-fee mark moved; all three are logged (WAD per share, basket legs in atomic units).
+  event MarkUpdated(uint256 markWad, uint256 markSettlementWad, uint256 markCorridorWad);
   event NavSettled(uint256 nav, uint256 timestamp);
   event OperatorSet(address indexed account, address indexed operator, bool approved);
   /// @param account The guardian, or whoever ran the timed-out emergency exit.
@@ -152,6 +153,9 @@ interface IOperatorVault {
   function pendingRiskSignerAt() external view returns (uint256);
   function guardian() external view returns (address);
   function feeRecipient() external view returns (address);
+  function settlementDecimals() external view returns (uint8);
+  function corridorDecimals() external view returns (uint8);
+  function perfFloorEnabled() external view returns (bool);
   function tradingEpoch() external view returns (uint256);
   function paused() external view returns (bool);
   function closeOnly() external view returns (bool);
