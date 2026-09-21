@@ -224,19 +224,17 @@ library VaultPolicy {
     return IOperatorVaultFactory(IOperatorVault(address(this)).factory());
   }
 
-  /// @notice Both fee recipients are exempt from the floor: their positions are dilution
-  ///         residue and there is no other way out of the vault.
+  /// @notice The floor keeps dust out of the queue, not holders in the vault: a request for
+  ///         the owner's whole balance is always allowed, since there is no other way out.
+  ///         That covers both fee recipients, whose dilution residue is all they hold.
   function validateRedeemRequest(
     uint256 shares,
     uint256 minRedeemShares,
+    uint256 balance,
     address controller,
-    address owner,
-    address feeRecipient
-  ) external view {
-    if (
-      shares == 0
-        || (shares < minRedeemShares && owner != feeRecipient && owner != _factory().protocolFeeRecipient())
-    ) revert VaultErrors.BelowMinSize();
+    address owner
+  ) external pure {
+    if (shares == 0 || (shares < minRedeemShares && shares != balance)) revert VaultErrors.BelowMinSize();
     if (controller == address(0) || owner == address(0)) revert VaultErrors.ZeroAddress();
   }
 

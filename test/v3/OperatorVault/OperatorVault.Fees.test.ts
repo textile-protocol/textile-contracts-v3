@@ -187,7 +187,7 @@ describe('OperatorVault — management fee', function () {
       expect(held).to.be.gt(0)
       expect(held).to.be.lt(await ctx.vault.minRedeemShares())
 
-      // Below the floor, both residue holders may queue; an LP may not.
+      // Below the floor, both residue holders may queue; an LP's partial request may not.
       await expect(ctx.vault.connect(proto).requestRedeem(held, proto.address, proto.address)).to.not
         .be.reverted
       const op = ctx.feeRecipient
@@ -291,7 +291,7 @@ describe('OperatorVault — management fee', function () {
      * Big enough that the settle-time checkpoint mints, so the queued shares
      * are no longer the whole supply and the exit pays pro rata. What is left
      * is the fee earned during the exit epoch itself — a new below-floor tail,
-     * redeemable on the same exemption. So the exit converges instead of
+     * redeemable as a whole balance like any other. So the exit converges instead of
      * completing in one pass, and nothing ever locks.
      */
     it('converges when the exit epoch accrues a new tail', async function () {
@@ -348,23 +348,26 @@ describe('OperatorVault — management fee', function () {
       ).to.be.revertedWithCustomError(ctx.vault, 'BelowMinSize')
     })
 
-    it('does not lift the floor for an ordinary LP', async function () {
+    it('does not lift the floor for a partial redeem', async function () {
       const ctx = await windDown()
-      await seedShares(ctx, ctx.lp2)
+      await seedShares(ctx, ctx.lp2, usdt(150n))
+      const held = await ctx.vault.balanceOf(ctx.lp2.address)
       await expect(
-        ctx.vault.connect(ctx.lp2).requestRedeem(usdt(1n), ctx.lp2.address, ctx.lp2.address)
+        ctx.vault.connect(ctx.lp2).requestRedeem(usdt(50n), ctx.lp2.address, ctx.lp2.address)
       ).to.be.revertedWithCustomError(ctx.vault, 'BelowMinSize')
+      await ctx.vault.connect(ctx.lp2).requestRedeem(held, ctx.lp2.address, ctx.lp2.address)
     })
 
-    it('does not lift the floor for the old recipient after a change', async function () {
+    // The residue is the old recipient's whole balance, and it has no other
+    // way out once the role has moved on.
+    it('lets the old recipient queue its residue after a change', async function () {
       const ctx = await windDown()
       const old = ctx.feeRecipient
       const held = await ctx.vault.balanceOf(old.address)
       await ctx.vault.connect(ctx.operatorAdmin).setFeeRecipient(ctx.other.address)
 
-      await expect(
-        ctx.vault.connect(old).requestRedeem(held, old.address, old.address)
-      ).to.be.revertedWithCustomError(ctx.vault, 'BelowMinSize')
+      await ctx.vault.connect(old).requestRedeem(held, old.address, old.address)
+      expect(await ctx.vault.balanceOf(old.address)).to.equal(0)
     })
   })
 })

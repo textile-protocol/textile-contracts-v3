@@ -287,3 +287,43 @@ describe('OperatorVault — redemptions', function () {
     expect(await ctx.vault.reservedSettlement()).to.equal(0)
   })
 })
+
+// The floor keeps dust out of the queue. It must not keep holders in the
+// vault: a balance under `minRedeemShares` has no other way out.
+describe('OperatorVault — the redeem floor', function () {
+  it('lets a holder queue the residue a partial redeem leaves below the floor', async function () {
+    const ctx = await deployOperatorVault()
+    await seedShares(ctx, ctx.lp1, usdt(150n))
+    await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(100n), ctx.lp1.address, ctx.lp1.address)
+    const residue = await ctx.vault.balanceOf(ctx.lp1.address)
+    expect(residue).to.equal(usdt(50n))
+    expect(residue).to.be.lt(await ctx.vault.minRedeemShares())
+
+    await ctx.vault.connect(ctx.lp1).requestRedeem(residue, ctx.lp1.address, ctx.lp1.address)
+    const epochId = await ctx.vault.currentRedeemEpochId()
+    expect(await ctx.vault.requestUnits(ctx.lp1.address, epochId)).to.equal(usdt(150n))
+    expect(await ctx.vault.balanceOf(ctx.lp1.address)).to.equal(0)
+  })
+
+  it('lets a sub-floor transfer recipient queue their whole balance', async function () {
+    const ctx = await seededVault()
+    await ctx.vault.connect(ctx.lp1).transfer(ctx.other.address, usdt(50n))
+
+    await ctx.vault.connect(ctx.other).requestRedeem(usdt(50n), ctx.other.address, ctx.other.address)
+    expect(await ctx.vault.balanceOf(ctx.other.address)).to.equal(0)
+  })
+
+  it('measures the whole balance against the owner, not the caller', async function () {
+    const ctx = await seededVault()
+    await seedShares(ctx, ctx.lp2, usdt(150n))
+    await ctx.vault.connect(ctx.lp2).requestRedeem(usdt(100n), ctx.lp2.address, ctx.lp2.address)
+    await ctx.vault.connect(ctx.lp2).setOperator(ctx.lp1.address, true)
+
+    // lp1 holds 1,000, so 50 is a partial request for itself and a whole balance for lp2.
+    await expect(
+      ctx.vault.connect(ctx.lp1).requestRedeem(usdt(50n), ctx.lp1.address, ctx.lp1.address)
+    ).to.be.revertedWithCustomError(ctx.vault, 'BelowMinSize')
+    await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(50n), ctx.lp2.address, ctx.lp2.address)
+    expect(await ctx.vault.balanceOf(ctx.lp2.address)).to.equal(0)
+  })
+})

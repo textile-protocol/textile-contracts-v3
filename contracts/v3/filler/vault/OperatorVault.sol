@@ -331,14 +331,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   //////////////////////////////////////////////////////////////*/
 
   /// @inheritdoc IOperatorVault
-  /// @dev No pause check: exits must always be able to queue.
+  /// @dev No pause check: exits must always be able to queue. The balance read here is the
+  ///      owner's, not the caller's, and the pull that follows is from the same account.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     override
     nonReentrant
     returns (uint256 requestId)
   {
-    VaultPolicy.validateRedeemRequest(shares, minRedeemShares, controller, owner, _roles.feeRecipient);
+    VaultPolicy.validateRedeemRequest(shares, minRedeemShares, balanceOf(owner), controller, owner);
 
     requestId = _openOrCurrentRedeemEpoch();
     _pullShares(owner, shares);
