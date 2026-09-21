@@ -25,9 +25,9 @@ library VaultTypes {
     address feeRecipient;
   }
 
-  /// @notice Caller-supplied vault configuration. Factory fills reactor, Permit2,
-  ///         PreferredFillerValidation, and implementation version; the share
-  ///         token strings go to the constructor beside the config.
+  /// @notice Caller-supplied vault configuration. The factory fills in
+  ///         reactor, Permit2 and PreferredFillerValidation; the share token
+  ///         strings go to the constructor beside the config.
   struct VaultInit {
     /// @dev ERC-20 name and symbol of the share token, chosen by the operator.
     string name;
@@ -45,6 +45,8 @@ library VaultTypes {
     uint256 minReserveSettlement;
     uint256 minReserveCorridor;
     uint256 maxOrderLifetime;
+    /// @dev Durations run from the epoch opening, timeouts from its close.
+    ///      Only `emergencyExitTimeout > valuationTimeout` is enforced.
     uint256 depositEpochDuration;
     uint256 redemptionEpochDuration;
     uint256 redemptionCloseCooldown;
@@ -97,6 +99,5 @@ library VaultTypes {
     uint256 minRedeemShares;
     address yieldAdapter;
     uint256 minLiquidSettlement;
-    uint256 version;
   }
 }

@@ -93,6 +93,9 @@ export interface VaultOrderInput {
    *  for an order fillable through the VaultOrderExecutor. */
   fillers?: string[]
   exclusiveUntil?: bigint
+  /** Permit2's permitted amount. Defaults to `inputAmount`, which is the only
+   *  value the vault's policy accepts; override it to exercise the spread. */
+  inputMaxAmount?: bigint
 }
 
 export function orderParams(o: VaultOrderInput): LimitOrderParams {
@@ -142,7 +145,9 @@ export async function signVaultEnvelope(
         input: {
           token: params.inputToken,
           amount: params.inputAmount,
-          maxAmount: params.inputAmount,
+          // Not covered by the witness or by `VaultLib.permit2Digest`, so an
+          // override here leaves `hash` alone and lands on the order policy.
+          maxAmount: o.inputMaxAmount ?? params.inputAmount,
         },
         outputs: [
           {

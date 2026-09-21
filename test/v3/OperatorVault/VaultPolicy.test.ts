@@ -12,6 +12,41 @@ import {
   signAttestation,
 } from './helpers/vaultSignatures'
 
+/** A config `validateConfig` accepts, for tests that break one field at a time. */
+async function validConfig(ctx: Awaited<ReturnType<typeof deployOperatorVault>>) {
+  return {
+    settlementAsset: await ctx.settlement.getAddress(),
+    corridorAsset: await ctx.corridor.getAddress(),
+    reactor: ctx.reactor,
+    permit2: ctx.permit2,
+    preferredFillerValidation: ctx.preferredFiller,
+    operatorAdmin: ctx.operatorAdmin.address,
+    strategySigner: ctx.strategy.address,
+    riskAdmin: ctx.riskAdmin.address,
+    riskSigner: ctx.risk.address,
+    guardian: ctx.guardian.address,
+    feeRecipient: ctx.feeRecipient.address,
+    maxOrderInputSettlement: usdt(100n),
+    maxOrderInputCorridor: usdt(100n),
+    minReserveSettlement: 0n,
+    minReserveCorridor: 0n,
+    maxOrderLifetime: 3600n,
+    depositEpochDuration: DAY,
+    redemptionEpochDuration: DAY,
+    redemptionCloseCooldown: DAY,
+    emergencyExitTimeout: 7 * DAY,
+    valuationTimeout: DAY,
+    managementFeeWad: 0n,
+    performanceFeeWad: 0n,
+    riskSignerDelay: DAY,
+    minDepositAssets: usdt(1n),
+    minDepositCorridor: 0n,
+    minRedeemShares: usdt(1n),
+    yieldAdapter: ethers.ZeroAddress,
+    minLiquidSettlement: 0n,
+  }
+}
+
 describe('VaultPolicy', function () {
   it('rejects a zero-price or expired attestation', async function () {
     const ctx = await deployOperatorVault()
@@ -223,40 +258,9 @@ describe('VaultPolicy', function () {
       .reverted
   })
 
-  it('rejects a config with a zero duration, size, or version', async function () {
+  it('rejects a config with a zero duration or size', async function () {
     const ctx = await deployOperatorVault()
-    const cfg = {
-      settlementAsset: await ctx.settlement.getAddress(),
-      corridorAsset: await ctx.corridor.getAddress(),
-      reactor: ctx.reactor,
-      permit2: ctx.permit2,
-      preferredFillerValidation: ctx.preferredFiller,
-      operatorAdmin: ctx.operatorAdmin.address,
-      strategySigner: ctx.strategy.address,
-      riskAdmin: ctx.riskAdmin.address,
-      riskSigner: ctx.risk.address,
-      guardian: ctx.guardian.address,
-      feeRecipient: ctx.feeRecipient.address,
-      maxOrderInputSettlement: usdt(100n),
-      maxOrderInputCorridor: usdt(100n),
-      minReserveSettlement: 0n,
-      minReserveCorridor: 0n,
-      maxOrderLifetime: 3600n,
-      depositEpochDuration: DAY,
-      redemptionEpochDuration: DAY,
-      redemptionCloseCooldown: DAY,
-      emergencyExitTimeout: 7 * DAY,
-      valuationTimeout: DAY,
-      managementFeeWad: 0n,
-      performanceFeeWad: 0n,
-      riskSignerDelay: DAY,
-      minDepositAssets: usdt(1n),
-      minDepositCorridor: 0n,
-      minRedeemShares: usdt(1n),
-      yieldAdapter: ethers.ZeroAddress,
-      minLiquidSettlement: 0n,
-      version: 1n,
-    }
+    const cfg = await validConfig(ctx)
     await expect(ctx.harness.validateConfig({ ...cfg, depositEpochDuration: 0n })).to.be.reverted
     await expect(
       ctx.harness.validateConfig({ ...cfg, depositEpochDuration: 2n ** 64n })
@@ -283,7 +287,6 @@ describe('VaultPolicy', function () {
     ).to.be.reverted
     await expect(ctx.harness.validateConfig({ ...cfg, minDepositAssets: 0n })).to.be.reverted
     await expect(ctx.harness.validateConfig({ ...cfg, minRedeemShares: 0n })).to.be.reverted
-    await expect(ctx.harness.validateConfig({ ...cfg, version: 0n })).to.be.reverted
     await expect(ctx.harness.validateConfig({ ...cfg, maxOrderLifetime: 0n })).to.be.reverted
     // A liquid floor makes no sense without a yield adapter.
     await expect(ctx.harness.validateConfig({ ...cfg, minLiquidSettlement: 1n })).to.be.reverted
@@ -324,5 +327,73 @@ describe('VaultPolicy', function () {
       await expect(ctx.harness.validateConfig({ ...cfg, [field]: cap })).to.not.be.reverted
       await expect(ctx.harness.validateConfig({ ...cfg, [field]: cap + 1n })).to.be.reverted
     }
+  })
+
+  // The emergency exit is permissionless and pauses the vault, so a vault
+  // whose exit timeout undercuts its own valuation window hands anyone a
+  // pause every time a redeem epoch closes (audit v0.3 N-04).
+  it('refuses an emergency exit that opens before the valuation window shuts', async function () {
+    const ctx = await deployOperatorVault()
+    const cfg = await validConfig(ctx)
+
+    for (const emergencyExitTimeout of [DAY - 1, DAY]) {
+      await expect(
+        ctx.harness.validateConfig({ ...cfg, emergencyExitTimeout, valuationTimeout: DAY }),
+        `emergencyExitTimeout ${emergencyExitTimeout} should not be accepted`
+      ).to.be.reverted
+    }
+    await expect(
+      ctx.harness.validateConfig({ ...cfg, emergencyExitTimeout: DAY + 1, valuationTimeout: DAY })
+    ).to.not.be.reverted
+  })
+
+  // The ceiling is what lets the vault add a duration to `block.timestamp` and
+  // cast to uint64 without a runtime check (audit v0.3 N-07).
+  it('caps every configured duration at half the uint64 range', async function () {
+    const ctx = await deployOperatorVault()
+    const cfg = await validConfig(ctx)
+    const max = (2n ** 64n - 1n) / 2n
+
+    for (const field of [
+      'depositEpochDuration',
+      'redemptionEpochDuration',
+      'redemptionCloseCooldown',
+      'emergencyExitTimeout',
+      'valuationTimeout',
+      'riskSignerDelay',
+    ] as const) {
+      await expect(
+        ctx.harness.validateConfig({ ...cfg, [field]: max + 1n }),
+        `${field} should refuse one past the ceiling`
+      ).to.be.reverted
+    }
+
+    // The ceiling itself is accepted. `valuationTimeout` is the one that
+    // cannot sit at it, since the exit timeout has to clear it.
+    for (const field of [
+      'depositEpochDuration',
+      'redemptionEpochDuration',
+      'redemptionCloseCooldown',
+      'emergencyExitTimeout',
+      'riskSignerDelay',
+    ] as const) {
+      await expect(
+        ctx.harness.validateConfig({ ...cfg, [field]: max }),
+        `${field} should accept the ceiling`
+      ).to.not.be.reverted
+    }
+    await expect(
+      ctx.harness.validateConfig({
+        ...cfg,
+        valuationTimeout: max - 1n,
+        emergencyExitTimeout: max,
+      })
+    ).to.not.be.reverted
+  })
+
+  it('deploys no vault whose emergency exit undercuts its valuation timeout', async function () {
+    await expect(
+      deployOperatorVault({ emergencyExitTimeout: DAY, valuationTimeout: DAY })
+    ).to.be.reverted
   })
 })

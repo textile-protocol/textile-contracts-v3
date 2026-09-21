@@ -15,7 +15,6 @@ describe('OperatorVault — constructor and views', function () {
   it('reports accounting views and the settlement asset', async function () {
     const { vault, settlement, corridor, factory } = await deployOperatorVault()
     expect(await vault.factory()).to.equal(await factory.getAddress())
-    expect(await vault.asset()).to.equal(await settlement.getAddress())
     expect(await vault.settlementAsset()).to.equal(await settlement.getAddress())
     expect(await vault.corridorAsset()).to.equal(await corridor.getAddress())
     expect(await vault.totalAssets()).to.equal(0)

@@ -73,6 +73,8 @@ interface IOperatorVault {
     external
     returns (uint256 requestId);
 
+  /// @notice Pay a processed or settled request out to `receiver`. The vault
+  ///         itself is refused: the request would be spent for nothing.
   function claim(uint256 requestId, address controller, address receiver) external;
 
   function setOperator(address operator, bool approved) external returns (bool);
@@ -172,9 +174,16 @@ interface IOperatorVault {
 
   function settlementAsset() external view returns (IERC20);
   /// @notice The OperatorVaultFactory that deployed this vault. Immutable;
-  ///         it also carries the protocol's fee cut.
+  ///         it carries the protocol's fee cut and the implementation
+  ///         `VERSION()`, which the vault does not keep its own copy of.
   function factory() external view returns (address);
   function corridorAsset() external view returns (IERC20);
+  function reactor() external view returns (address);
+  function permit2() external view returns (address);
+  function preferredFillerValidation() external view returns (address);
+  function maxOrderLifetime() external view returns (uint256);
+  function maxOrderInputSettlement() external view returns (uint256);
+  function maxOrderInputCorridor() external view returns (uint256);
   function operatorAdmin() external view returns (address);
   function pendingOperatorAdmin() external view returns (address);
   function strategySigner() external view returns (address);

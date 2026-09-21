@@ -2,7 +2,7 @@ import { time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
-import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
+import { DAY, PRICE_1, cngn, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { closeAndProcessDeposit, closeRedeem, seedShares } from './helpers/vaultLifecycle'
 import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
@@ -81,6 +81,32 @@ describe('OperatorVault — remaining edges', function () {
       vault,
       'NothingToClaim'
     )
+  })
+
+  // Each of these decrements the books as if it were paid, leaving tokens or
+  // shares in the vault that nothing can reach (audit v0.3 N-09).
+  it('refuses the paths that pay, control, or bill the vault itself', async function () {
+    const ctx = await deployOperatorVault()
+    const vaultAddress = await ctx.vault.getAddress()
+    await ctx.vault.connect(ctx.lp1).requestDeposit(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
+    const depositId = await closeAndProcessDeposit(ctx)
+
+    await expect(
+      ctx.vault.connect(ctx.lp1).claim(depositId, ctx.lp1.address, vaultAddress)
+    ).to.be.revertedWithCustomError(ctx.vault, 'InvalidParams')
+    await expect(ctx.vault.connect(ctx.lp1).claim(depositId, ctx.lp1.address, ctx.lp1.address)).to
+      .not.be.reverted
+
+    await expect(
+      ctx.vault.connect(ctx.lp1).requestDeposit(usdt(1_000n), vaultAddress, ctx.lp1.address)
+    ).to.be.revertedWithCustomError(ctx.vault, 'InvalidParams')
+    await expect(
+      ctx.vault.connect(ctx.lp1).requestDepositCorridor(cngn(1_000n), vaultAddress, ctx.lp1.address)
+    ).to.be.revertedWithCustomError(ctx.vault, 'InvalidParams')
+
+    await expect(
+      ctx.vault.connect(ctx.operatorAdmin).setFeeRecipient(vaultAddress)
+    ).to.be.revertedWithCustomError(ctx.vault, 'InvalidParams')
   })
 
   it('rejects cancel after the deposit epoch is closed', async function () {

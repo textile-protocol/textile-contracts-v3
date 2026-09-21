@@ -83,7 +83,11 @@ export function feeShares(
   return mulDiv(supply, capped, WAD * YEAR - capped)
 }
 
-/** VaultPolicy.MAX_MANAGEMENT_FEE_WAD: 25% of supply per year. */
+/**
+ * VaultPolicy.MAX_MANAGEMENT_FEE_WAD: 25% of supply per year. A ceiling on an
+ * immutable the operator sets once, not a suggested rate — the create form's
+ * house terms are 10%. Settled at 25% in audit v0.3 N-11.
+ */
 export const MAX_MANAGEMENT_FEE_WAD = WAD / 4n
 
 /**

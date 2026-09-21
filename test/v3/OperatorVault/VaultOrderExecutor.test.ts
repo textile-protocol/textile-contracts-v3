@@ -219,6 +219,43 @@ describe('VaultOrderExecutor', function () {
     expect(await ctx.adapter.held()).to.equal(usdt(12_000n))
   })
 
+  // VaultOrderExecutor funds the reactor out of the order's single output
+  // token, so a fee billed anywhere else is not fundable by this wrapper and
+  // the fill has to be refused, not half-paid (audit v0.3 N-14). The other
+  // UnsupportedOrder test only covers a reactor mismatch.
+  it('rejects a fill whose fee controller bills in a token the order never pays', async function () {
+    const ctx = await deployExecutorContext()
+    const filler = ctx.other
+    const reactor = await ethers.getContractAt('LimitOrderReactor', ctx.reactor)
+
+    const Foreign = await ethers.getContractFactory('ERC20Mock')
+    const foreign = await Foreign.deploy('FOREIGN', 'FGN', 18)
+    const Controller = await ethers.getContractFactory('ForeignTokenFeeControllerMock')
+    const controller = await Controller.deploy(
+      await foreign.getAddress(),
+      ctx.feeRecipient.address,
+      1n
+    )
+    await reactor.connect(ctx.deployer).setProtocolFeeController(await controller.getAddress())
+
+    const order = await signedOrder(ctx, {
+      inputToken: ctx.settlement.target as string,
+      inputAmount: usdt(5_000n),
+      outputToken: ctx.corridor.target as string,
+      outputAmount: cngn(5_000n),
+      taker: filler.address,
+    })
+    await ctx.corridor.mint(filler.address, cngn(5_000n))
+    await ctx.corridor
+      .connect(filler)
+      .approve(await ctx.executor.getAddress(), ethers.MaxUint256)
+
+    await expect(ctx.executor.connect(filler).fill(order)).to.be.revertedWithCustomError(
+      ctx.executor,
+      'UnsupportedOrder'
+    )
+  })
+
   it('rejects orders whose swapper is not a factory vault', async function () {
     const ctx = await deployExecutorContext()
     const { params } = await signVaultEnvelope(ctx.strategy, ctx.risk, {

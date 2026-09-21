@@ -78,6 +78,23 @@ describe('AaveV3YieldAdapter', function () {
     ).to.be.revertedWithCustomError(adapter, 'AlreadyInitialized')
   })
 
+  // Both zero guards run before the caller check, so an EOA can reach them on
+  // a fresh clone (audit v0.3 N-14).
+  it('rejects initialize with a zero vault or a zero asset', async function () {
+    const { adapter, eoaVault, asset } = await deploy()
+
+    await expect(
+      adapter.connect(eoaVault).initialize(ethers.ZeroAddress, await asset.getAddress())
+    ).to.be.revertedWithCustomError(adapter, 'ZeroAddress')
+    await expect(
+      adapter.connect(eoaVault).initialize(eoaVault.address, ethers.ZeroAddress)
+    ).to.be.revertedWithCustomError(adapter, 'ZeroAddress')
+
+    // Neither attempt bound anything, so the clone is still initializable.
+    await adapter.connect(eoaVault).initialize(eoaVault.address, await asset.getAddress())
+    expect(await adapter.vault()).to.equal(eoaVault.address)
+  })
+
   it('rejects an asset without an aToken reserve', async function () {
     const { adapter, eoaVault } = await deploy()
     const Token = await ethers.getContractFactory('ERC20Mock')

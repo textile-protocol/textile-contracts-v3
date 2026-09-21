@@ -146,8 +146,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       minDepositCorridor: init.minDepositCorridor,
       minRedeemShares: init.minRedeemShares,
       yieldAdapter: adapter,
-      minLiquidSettlement: init.minLiquidSettlement,
-      version: VERSION
+      minLiquidSettlement: init.minLiquidSettlement
     });
 
     vault = VaultDeployer.deploy(cfg, init.name, init.symbol);
@@ -240,7 +239,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
 
   /// @dev Position of `vault` in `vaults`. Reverts `NotAuthorized` when it is
   ///      absent, which is a vault asking to be moved off a key it was never
-  ///      indexed under.
+  ///      indexed under — not reachable through `acceptOperatorAdmin` today.
   function _indexOf(address[] storage vaults, address vault) private view returns (uint256) {
     uint256 length = vaults.length;
     for (uint256 i = 0; i < length; ++i) {

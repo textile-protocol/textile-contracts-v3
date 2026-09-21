@@ -66,7 +66,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   address public immutable reactor;
   address public immutable permit2;
   address public immutable preferredFillerValidation;
-  uint256 public immutable version;
   uint256 public immutable maxOrderInputSettlement;
   uint256 public immutable maxOrderInputCorridor;
   uint256 public immutable minReserveSettlement;
@@ -199,7 +198,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     reactor = cfg.reactor;
     permit2 = cfg.permit2;
     preferredFillerValidation = cfg.preferredFillerValidation;
-    version = cfg.version;
     maxOrderInputSettlement = cfg.maxOrderInputSettlement;
     maxOrderInputCorridor = cfg.maxOrderInputCorridor;
     minReserveSettlement = cfg.minReserveSettlement;
@@ -448,12 +446,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     if (shares == supply && !isPaused) revert VaultErrors.PauseRequired();
     uint256 floorS = isPaused ? freeS : attestation.freeSettlement;
     uint256 floorC = isPaused ? freeC : attestation.freeCorridor;
-    uint256 settlementOut;
-    uint256 corridorOut;
-    if (shares > 0) {
-      settlementOut = Math.mulDiv(floorS, shares, supply);
-      corridorOut = Math.mulDiv(floorC, shares, supply);
-    }
+    // No zero guard: a closed redeem epoch always carries shares.
+    uint256 settlementOut = Math.mulDiv(floorS, shares, supply);
+    uint256 corridorOut = Math.mulDiv(floorC, shares, supply);
     _finishRedeemSettle(epochId, epoch, settlementOut, corridorOut, price);
   }
 
@@ -482,16 +477,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint256 freeC = _freeCorridor();
 
     uint256 shares = epoch.units;
-    uint256 settlementOut;
-    uint256 corridorOut;
-    uint256 yieldOut;
-    // Defensive: a closed redeem epoch always carries shares (there is no
-    // redeem cancel), so `supply` cannot be zero here.
-    if (shares > 0) {
-      settlementOut = Math.mulDiv(freeS, shares, supply);
-      corridorOut = Math.mulDiv(freeC, shares, supply);
-      yieldOut = Math.mulDiv(stranded, shares, supply);
-    }
+    uint256 settlementOut = Math.mulDiv(freeS, shares, supply);
+    uint256 corridorOut = Math.mulDiv(freeC, shares, supply);
+    uint256 yieldOut = Math.mulDiv(stranded, shares, supply);
     if (yieldOut > 0) {
       // Scaled: `yieldOut` is priced at this settlement's index, and both the
       // weight and the reserve have to survive the index moving under them.
@@ -515,6 +503,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ///      assets, so this cannot be ERC-7540 `withdraw`/`redeem`.
   function claim(uint256 requestId, address controller, address receiver) external override nonReentrant {
     if (receiver == address(0) || controller == address(0)) revert VaultErrors.ZeroAddress();
+    if (receiver == address(this)) revert VaultErrors.InvalidParams();
     _requireAuthorized(controller);
     if (requestClaimed[controller][requestId]) revert VaultErrors.AlreadyClaimed();
 
@@ -531,7 +520,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
       epoch.units -= units;
       bool inCorridor = epoch.inCorridor;
       _refundPending(inCorridor, receiver, units);
-      emit Claimed(controller, receiver, requestId, 0, inCorridor ? 0 : units, inCorridor ? units : 0);
+      // Lifted out of the emit: SlithIR cannot lower a ternary in an event arg.
+      uint256 refundSettlement = inCorridor ? 0 : units;
+      uint256 refundCorridor = inCorridor ? units : 0;
+      emit Claimed(controller, receiver, requestId, 0, refundSettlement, refundCorridor);
       return;
     }
 
@@ -714,6 +706,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ///      write one word and call nothing, so they are not.
   function setFeeRecipient(address next) external onlyOperatorAdmin nonReentrant {
     if (next == address(0)) revert VaultErrors.ZeroAddress();
+    if (next == address(this)) revert VaultErrors.InvalidParams();
     _checkpointFee(0);
     emit FeeRecipientUpdated(_roles.feeRecipient, next);
     _roles.feeRecipient = next;
@@ -806,10 +799,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     return lastSettledNav;
   }
 
-  function asset() external view returns (address) {
-    return address(settlementAsset);
-  }
-
   /// @notice Share units track settlement atomic units, so decimals match the asset.
   function decimals() public view override returns (uint8) {
     return settlementDecimals;
@@ -828,6 +817,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     if (inCorridor && minimum == 0) revert VaultErrors.CorridorDepositsDisabled();
     if (assets < minimum) revert VaultErrors.BelowMinSize();
     if (controller == address(0) || owner == address(0)) revert VaultErrors.ZeroAddress();
+    // The vault never calls setOperator, so nothing could claim such a request.
+    if (controller == address(this)) revert VaultErrors.InvalidParams();
     _requireAuthorized(owner);
 
     requestId = _openOrCurrentDepositEpoch(inCorridor);
@@ -863,9 +854,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     id = nextEpochId++;
     if (inCorridor) currentCorridorDepositEpochId = id;
     else currentDepositEpochId = id;
-    uint256 cutoffTs = block.timestamp + depositEpochDuration;
-    if (cutoffTs > type(uint64).max) revert VaultErrors.InvalidParams();
-    _openEpoch(id, true, inCorridor, uint64(cutoffTs));
+    // Durations are capped at half the uint64 range, so the sum always fits.
+    _openEpoch(id, true, inCorridor, uint64(block.timestamp + depositEpochDuration));
   }
 
   /// @dev No cutoff: the epoch never closes itself, so it stays Open until
@@ -906,7 +896,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint256 price
   ) private {
     uint256 shares = epoch.units;
-    if (shares > 0) _burn(address(this), shares);
+    _burn(address(this), shares);
     reservedSettlement += settlementOut;
     reservedCorridor += corridorOut;
     epoch.remainingUnits = shares;

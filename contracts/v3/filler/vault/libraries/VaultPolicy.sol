@@ -21,24 +21,6 @@ import { VaultErrors } from "./VaultErrors.sol";
 import { VaultLib } from "./VaultLib.sol";
 import { VaultTypes } from "./VaultTypes.sol";
 
-interface IVaultSignatureSource {
-  function reactor() external view returns (address);
-  function permit2() external view returns (address);
-  function preferredFillerValidation() external view returns (address);
-  function tradingEpoch() external view returns (uint256);
-  function maxOrderLifetime() external view returns (uint256);
-  function settlementAsset() external view returns (address);
-  function corridorAsset() external view returns (address);
-  function maxOrderInputSettlement() external view returns (uint256);
-  function maxOrderInputCorridor() external view returns (uint256);
-  function quotableSettlement() external view returns (uint256);
-  function liquidSettlement() external view returns (uint256);
-  function quotableCorridor() external view returns (uint256);
-  function closeOnly() external view returns (bool);
-  function strategySigner() external view returns (address);
-  function riskSigner() external view returns (address);
-}
-
 /// @notice Linked library: order policy, constructor checks, fee accrual, the
 ///         admin lifecycle, sweeps, and yield-adapter plumbing. Kept out of
 ///         OperatorVault so the factory stays under the 24kb runtime cap.
@@ -50,11 +32,14 @@ interface IVaultSignatureSource {
 library VaultPolicy {
   using SafeERC20 for IERC20;
 
-  /// @notice Annual management-fee ceiling: 25% of supply per year.
+  /// @notice Annual management-fee ceiling: 25% of supply per year. A bound on
+  ///         a deploy-time immutable, not a suggested rate — house terms are 10%.
   uint256 internal constant MAX_MANAGEMENT_FEE_WAD = 25e16;
   /// @notice 50% of the gain above the mark; also keeps `nav - feeAssets` positive.
   uint256 internal constant MAX_PERFORMANCE_FEE_WAD = 50e16;
   uint8 internal constant MAX_TOKEN_DECIMALS = 18;
+  /// @notice Ceiling on every configured duration. See `_requireSafeDuration`.
+  uint256 internal constant MAX_DURATION = type(uint64).max / 2;
 
   struct OrderContext {
     address reactor;
@@ -93,7 +78,7 @@ library VaultPolicy {
       cfg.maxOrderInputSettlement == 0 || cfg.maxOrderInputCorridor == 0 || cfg.maxOrderLifetime == 0
         || cfg.depositEpochDuration == 0 || cfg.redemptionEpochDuration == 0 || cfg.redemptionCloseCooldown == 0
         || cfg.emergencyExitTimeout == 0 || cfg.valuationTimeout == 0
-        || cfg.riskSignerDelay == 0 || cfg.minDepositAssets == 0 || cfg.minRedeemShares == 0 || cfg.version == 0
+        || cfg.riskSignerDelay == 0 || cfg.minDepositAssets == 0 || cfg.minRedeemShares == 0
     ) revert VaultErrors.InvalidParams();
     if (cfg.yieldAdapter == address(0) && cfg.minLiquidSettlement != 0) revert VaultErrors.InvalidParams();
     _requireSafeDuration(cfg.depositEpochDuration);
@@ -102,6 +87,8 @@ library VaultPolicy {
     _requireSafeDuration(cfg.emergencyExitTimeout);
     _requireSafeDuration(cfg.valuationTimeout);
     _requireSafeDuration(cfg.riskSignerDelay);
+    // Or the permissionless exit pauses the vault before the operator can settle.
+    if (cfg.emergencyExitTimeout <= cfg.valuationTimeout) revert VaultErrors.InvalidParams();
     if (cfg.managementFeeWad > MAX_MANAGEMENT_FEE_WAD || cfg.performanceFeeWad > MAX_PERFORMANCE_FEE_WAD) {
       revert VaultErrors.InvalidParams();
     }
@@ -292,6 +279,9 @@ library VaultPolicy {
     OutputToken memory output = order.outputs[0];
     if (output.recipient != ctx.vault) return false;
     if (output.amount == 0 || order.input.amount == 0) return false;
+    // Fixed input only. Also implied by the permit2 digest, stated here so it
+    // does not rest on two files agreeing.
+    if (order.input.maxAmount != order.input.amount) return false;
 
     address inputToken = address(order.input.token);
     bool sellSettlement = inputToken == ctx.settlementAsset && output.token == ctx.corridorAsset;
@@ -323,13 +313,13 @@ library VaultPolicy {
     view
     returns (bytes4)
   {
-    IVaultSignatureSource src = IVaultSignatureSource(vault);
+    IOperatorVault src = IOperatorVault(vault);
     (LimitOrder memory order, bytes memory operatorSig, bytes memory riskSig) =
       abi.decode(signature, (LimitOrder, bytes, bytes));
     if (order.outputs.length != 1) return VaultLib.ERC1271_FAIL;
     if (VaultLib.permit2Digest(order, src.permit2(), block.chainid) != hash) return VaultLib.ERC1271_FAIL;
-    address settlement = src.settlementAsset();
-    address corridor = src.corridorAsset();
+    address settlement = address(src.settlementAsset());
+    address corridor = address(src.corridorAsset());
     address inputToken = address(order.input.token);
     uint256 quotableS;
     uint256 quotableC;
@@ -543,7 +533,7 @@ library VaultPolicy {
     if (block.timestamp < att.validAfter || block.timestamp > att.validUntil) revert VaultErrors.InvalidAttestation();
     if (att.corridorAssetPrice == 0) revert VaultErrors.InvalidAttestation();
     bytes32 digest = VaultLib.attestationDigest(att, vault, block.chainid);
-    IVaultSignatureSource src = IVaultSignatureSource(vault);
+    IOperatorVault src = IOperatorVault(vault);
     if (
       !VaultLib.isSigner(src.strategySigner(), digest, strategySignature)
         || !VaultLib.isSigner(src.riskSigner(), digest, riskSignature)
@@ -556,9 +546,10 @@ library VaultPolicy {
     if (d == 0 || d > MAX_TOKEN_DECIMALS) revert VaultErrors.InvalidDecimals();
   }
 
-  /// @dev Epoch timestamps are uint64. A duration that cannot be added to now
-  ///      without overflowing that width bricks later close / timeout / rotation.
-  function _requireSafeDuration(uint256 duration) private view {
-    if (duration > type(uint64).max - block.timestamp) revert VaultErrors.InvalidParams();
+  /// @dev Epoch timestamps are uint64. Half the width, not `uint64.max - now`:
+  ///      the vault already truncates `block.timestamp` to uint64, so this makes
+  ///      `now + duration` fit by construction rather than only at deploy time.
+  function _requireSafeDuration(uint256 duration) private pure {
+    if (duration > MAX_DURATION) revert VaultErrors.InvalidParams();
   }
 }
