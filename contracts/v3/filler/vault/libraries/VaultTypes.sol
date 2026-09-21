@@ -53,7 +53,7 @@ library VaultTypes {
     uint256 emergencyExitTimeout;
     uint256 valuationTimeout;
     uint256 managementFeeWad;
-    /// @dev Share of the gain above the high-water mark, WAD. Zero = off.
+    /// @dev Share of the gain above the basket mark, WAD. Zero = off.
     uint256 performanceFeeWad;
     /// @dev Textile's cut of each fee leg, WAD. Held on the factory, not the vault.
     uint256 protocolManagementShareWad;

@@ -124,7 +124,7 @@ library VaultLib {
     pure
     returns (uint256)
   {
-    if (supply == 0 || feeWad == 0 || gain == 0) return 0;
+    if (feeWad == 0 || gain == 0) return 0;
     uint256 feeAssets = Math.mulDiv(gain, feeWad, WAD);
     if (feeAssets == 0) return 0;
     return Math.mulDiv(feeAssets, supply, navAssets - feeAssets);
@@ -142,9 +142,8 @@ library VaultLib {
     return Math.mulDiv(units, WAD, supply, Math.Rounding.Ceil);
   }
 
-  /// @notice Never re-bases down, so a recovery is not charged twice; an empty vault resets to par.
+  /// @notice Never re-bases down, so a recovery is not charged twice.
   function markAfter(uint256 navAssets, uint256 supply, uint256 markWad) internal pure returns (uint256) {
-    if (supply == 0) return WAD;
     return Math.max(markWad, Math.mulDiv(navAssets, WAD, supply));
   }
 

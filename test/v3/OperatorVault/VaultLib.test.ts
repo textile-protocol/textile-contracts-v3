@@ -79,10 +79,9 @@ describe('VaultLib', function () {
     expect(await harness.basketPerShare(1n, 3n)).to.equal(math.basketPerShare(1n, 3n))
     expect(await harness.basketPerShare(500n, 0n)).to.equal(0n)
 
-    // Ratchets up, never down; an empty vault re-bases to par.
+    // Ratchets up, never down.
     expect(await harness.markAfter(200n, 100n, WAD)).to.equal(2n * WAD)
     expect(await harness.markAfter(50n, 100n, WAD)).to.equal(WAD)
-    expect(await harness.markAfter(50n, 0n, 2n * WAD)).to.equal(WAD)
   })
 
   it('splits a fee accrual so the two legs always sum to the whole', async function () {

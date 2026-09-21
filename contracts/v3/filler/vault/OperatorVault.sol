@@ -382,11 +382,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     _recallAll();
     (uint256 price, uint256 freeS, uint256 freeC) =
       _verifiedLiveNav(epochId, attestation, strategySignature, riskSignature);
-    // Unpaused: pay off the attested floors so an in-flight Permit2 pull cannot inflate the
-    // take, and refuse a full-supply exit (it would stamp the swap output as orphaned NAV).
-    // Paused: ERC-1271 is dead, so live is the floor and hostile signers cannot settle a
-    // partial epoch at 0 to lock out `settleRedeemEmergencyInKind`. Either way the fee is
-    // charged on the inventory the redeemers are paid from.
+    // Unpaused: pay off the attested floors so an in-flight Permit2 pull cannot inflate the take.
+    // Paused: ERC-1271 is dead, so live is the floor and hostile signers cannot settle a partial
+    // epoch at 0 to lock out `settleRedeemEmergencyInKind`. The fee is charged on the same floors.
     bool isPaused = paused;
     uint256 floorS = isPaused ? freeS : attestation.freeSettlement;
     uint256 floorC = isPaused ? freeC : attestation.freeCorridor;
