@@ -21,24 +21,20 @@ import { VaultErrors } from "./VaultErrors.sol";
 import { VaultLib } from "./VaultLib.sol";
 import { VaultTypes } from "./VaultTypes.sol";
 
-/// @notice Linked library: order policy, constructor checks, fee accrual, the
-///         admin lifecycle, sweeps, and yield-adapter plumbing. Kept out of
-///         OperatorVault so the factory stays under the 24kb runtime cap.
-///         Non-view functions run as delegatecalls from the vault, so the
-///         adapter always sees the vault as caller.
-/// @dev    Not a trust boundary: a substituted library at link time is a full
-///         vault compromise, so the linked address is part of the vault's
-///         identity. `VaultVerificationBundle.test.ts` pins it.
+/// @notice Linked library holding the vault logic that does not fit under the 24kb cap:
+///         order policy, config checks, fee accrual, admin lifecycle, sweeps, adapter plumbing.
+///         Non-view functions run as delegatecalls, so the adapter always sees the vault as caller.
+/// @dev Not a trust boundary: the linked address is part of the vault's identity and
+///      `VaultVerificationBundle.test.ts` pins it.
 library VaultPolicy {
   using SafeERC20 for IERC20;
 
-  /// @notice Annual management-fee ceiling: 25% of supply per year. A bound on
-  ///         a deploy-time immutable, not a suggested rate — house terms are 10%.
+  /// @notice Caps on the deploy-time fee immutables. House terms are 10% management.
   uint256 internal constant MAX_MANAGEMENT_FEE_WAD = 25e16;
-  /// @notice 50% of the gain above the mark; also keeps `nav - feeAssets` positive.
+  /// @notice Below 100% so `nav - feeAssets` in `performanceFeeShares` stays positive.
   uint256 internal constant MAX_PERFORMANCE_FEE_WAD = 50e16;
   uint8 internal constant MAX_TOKEN_DECIMALS = 18;
-  /// @notice Ceiling on every configured duration. See `_requireSafeDuration`.
+  /// @notice Epoch timestamps are uint64, so `now + duration` fits by construction.
   uint256 internal constant MAX_DURATION = type(uint64).max / 2;
 
   struct OrderContext {
@@ -57,8 +53,7 @@ library VaultPolicy {
   }
 
   /// @return settlementDecimals_ The settlement asset's decimals.
-  /// @return corridorDecimals_ The corridor asset's decimals. Both returned
-  ///         so the constructor does not repeat the external reads.
+  /// @return corridorDecimals_ The corridor asset's decimals.
   function validateConfig(VaultTypes.VaultConfig memory cfg)
     external
     view
@@ -72,7 +67,6 @@ library VaultPolicy {
     ) revert VaultErrors.ZeroAddress();
     if (address(cfg.settlementAsset) == address(cfg.corridorAsset)) revert VaultErrors.InvalidPair();
     if (cfg.strategySigner == cfg.riskSigner) revert VaultErrors.InvalidParams();
-    // Audit L-01, see `_requireDistinctAdmins`.
     if (cfg.operatorAdmin == cfg.riskAdmin) revert VaultErrors.InvalidParams();
     if (
       cfg.maxOrderInputSettlement == 0 || cfg.maxOrderInputCorridor == 0 || cfg.maxOrderLifetime == 0
@@ -87,7 +81,7 @@ library VaultPolicy {
     _requireSafeDuration(cfg.emergencyExitTimeout);
     _requireSafeDuration(cfg.valuationTimeout);
     _requireSafeDuration(cfg.riskSignerDelay);
-    // Or the permissionless exit pauses the vault before the operator can settle.
+    // Otherwise the permissionless exit pauses the vault before the operator can settle.
     if (cfg.emergencyExitTimeout <= cfg.valuationTimeout) revert VaultErrors.InvalidParams();
     if (cfg.managementFeeWad > MAX_MANAGEMENT_FEE_WAD || cfg.performanceFeeWad > MAX_PERFORMANCE_FEE_WAD) {
       revert VaultErrors.InvalidParams();
@@ -96,8 +90,7 @@ library VaultPolicy {
     corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
   }
 
-  /// @notice One checkpoint, both fee legs, each split with the protocol on
-  ///         its own terms. One call: the vault has no bytecode for two.
+  /// @notice Both fee legs for one checkpoint, each split with the protocol on its own terms.
   /// @param navAssets Attested NAV, never a live read; zero skips the performance leg.
   function checkpointAccrual(
     uint256 supply,
@@ -129,21 +122,14 @@ library VaultPolicy {
     protocolShares = mgmtProtocol + perfProtocol;
   }
 
-  /// @dev Runs under delegatecall, so `address(this)` is the vault and its
-  ///      `factory` is the immutable the vault was deployed with. Read here
-  ///      rather than passed in: an immutable costs the vault 33 bytes per
-  ///      read site and the vault has none to spare.
+  /// @dev Under delegatecall `address(this)` is the vault. Read rather than passed in: an
+  ///      immutable costs the vault 33 bytes per read site.
   function _factory() private view returns (IOperatorVaultFactory) {
     return IOperatorVaultFactory(IOperatorVault(address(this)).factory());
   }
 
-  /// @notice Size and address checks for `requestRedeem`. Both fee recipients
-  ///         are exempt from the floor: their positions are pure dilution
+  /// @notice Both fee recipients are exempt from the floor: their positions are dilution
   ///         residue and there is no other way out of the vault.
-  /// @dev The protocol recipient is read from the factory rather than cached
-  ///      in an immutable: the immutable costs more bytecode than the vault
-  ///      has spare (audit v0.2 §6 Code 2). `&&` short-circuits, so the
-  ///      ordinary path never makes the call.
   function validateRedeemRequest(
     uint256 shares,
     uint256 minRedeemShares,
@@ -158,8 +144,7 @@ library VaultPolicy {
     if (controller == address(0) || owner == address(0)) revert VaultErrors.ZeroAddress();
   }
 
-  /// @notice Bind a freshly cloned adapter to the calling vault and approve it
-  ///         for the settlement asset only.
+  /// @notice Bind a fresh adapter clone to the calling vault. Only the settlement asset is approved.
   /// @return yieldToken Token the adapter position is held in.
   function bindYieldAdapter(address adapter, IERC20 settlement) external returns (address yieldToken) {
     IYieldAdapter(adapter).initialize(address(this), address(settlement));
@@ -167,11 +152,8 @@ library VaultPolicy {
     return IYieldAdapter(adapter).yieldToken();
   }
 
-  /// @notice Recall enough from the adapter so at least `needed` is liquid.
-  ///         Strict: a shortfall of even 1 wei reverts, so a fill can never
-  ///         pull against a short balance.
-  /// @param reserved Position value already owed to emergency redeemers in
-  ///        yield token. Not vault inventory — a fill may not withdraw it.
+  /// @notice Recall enough so at least `needed` is liquid. A shortfall of even 1 wei reverts.
+  /// @param reserved Position already owed to emergency redeemers; a fill may not withdraw it.
   function prepareIdle(IYieldAdapter adapter, uint256 liquid, uint256 needed, uint256 reserved) external {
     if (liquid >= needed) return;
     if (address(adapter) == address(0)) revert VaultErrors.InsufficientSettlement();
@@ -182,59 +164,45 @@ library VaultPolicy {
     emit IOperatorVault.SettlementPrepared(needed, withdrawn);
   }
 
-  /// @notice Supply idle settlement above the floor. `halted` (paused or
-  ///         close-only) makes it a no-op.
+  /// @notice Supply idle settlement above the floor. No-op when `halted` (paused or close-only).
   function allocateIdle(IYieldAdapter adapter, uint256 liquid, uint256 minLiquid, bool halted) external {
-    if (address(adapter) == address(0) || halted || liquid <= minLiquid) return;
+    if (halted || liquid <= minLiquid) return;
     uint256 assets = liquid - minLiquid;
     adapter.deploy(assets);
     emit IOperatorVault.IdleAllocated(assets);
   }
 
-  /// @notice Recall the adapter position down to `reserved`. No-op when
-  ///         nothing free is held.
-  /// @param reserved Position value already owed to emergency redeemers in
-  ///        yield token. Withdrawing it would turn their in-kind claim into
-  ///        vault settlement they can no longer reach.
+  /// @notice Recall the adapter position down to `reserved`.
+  /// @param reserved Position already owed to emergency redeemers; withdrawing it would turn
+  ///        their in-kind claim into vault settlement they can no longer reach.
   function recallAllIdle(IYieldAdapter adapter, uint256 reserved) external {
-    if (address(adapter) == address(0)) return;
     uint256 held = adapter.held();
     if (held <= reserved) return;
     emit IOperatorVault.IdleRecalled(adapter.recall(_recallAmount(held, reserved)));
   }
 
-  /// @notice Best-effort full recall for the emergency exit. An impaired Aave
-  ///         reserve must not revert the last-resort settlement, so a failed
-  ///         withdrawal is swallowed and the position still stranded in the
-  ///         adapter is reported back for in-kind distribution.
-  /// @param reserved Position value already owed to emergency redeemers in
-  ///        yield token, left behind and excluded from `stranded`.
-  /// @return stranded Free underlying value still held by the adapter after.
+  /// @notice Best-effort full recall for the emergency exit: a failed withdrawal is swallowed
+  ///         and the position still stranded is reported back for in-kind distribution.
+  /// @return stranded Free underlying still held by the adapter afterwards.
   function tryRecallAllIdle(IYieldAdapter adapter, uint256 reserved) external returns (uint256 stranded) {
     if (address(adapter) == address(0)) return 0;
     uint256 held = adapter.held();
     if (held <= reserved) return 0;
     try adapter.recall(_recallAmount(held, reserved)) returns (uint256 withdrawn) {
       emit IOperatorVault.IdleRecalled(withdrawn);
-      // Re-read only on success: a reverted withdrawal moves nothing, so the
-      // pre-call `held` still stands (`IYieldAdapter.recall` requires that).
+      // A reverted recall moves nothing, so `held` is only re-read on success.
       held = adapter.held();
     } catch {} // solhint-disable-line no-empty-blocks
     return held > reserved ? held - reserved : 0;
   }
 
-  /// @dev `max` keeps Aave's own full-balance path (no 1-wei index dust) when
-  ///      nothing is reserved; otherwise take exactly the free part.
+  /// @dev `max` takes Aave's own full-balance path (no index dust) when nothing is reserved.
   function _recallAmount(uint256 held, uint256 reserved) private pure returns (uint256) {
     return reserved == 0 ? type(uint256).max : held - reserved;
   }
 
-  /// @notice Best-effort pull of the slice an emergency exit owes redeemers
-  ///         but could not move. Never reverts.
-  /// @param owed The deferred slice at its current face value.
+  /// @notice Best-effort pull of the deferred emergency slice. Never reverts.
   /// @return synced True when it crossed, so the vault can clear its reserve.
-  ///         The amount emitted is what the adapter actually moved, which can
-  ///         be a wei under `owed` after the protocol's own rounding.
   function syncPendingYield(IYieldAdapter adapter, uint256 owed) external returns (bool synced) {
     try adapter.transferHeld(address(this), owed) returns (uint256 sent) {
       emit IOperatorVault.YieldPullSynced(sent);
@@ -244,10 +212,7 @@ library VaultPolicy {
     }
   }
 
-  /// @notice Pay one claimant's share of the in-kind yield leg.
-  /// @dev The residue helper hands the last claimant the exact remainder, so
-  ///      the pot drains to zero rather than stranding dust in a vault that
-  ///      cannot sweep the yield token.
+  /// @notice Pay one claimant's share of the in-kind yield leg; the last claimant gets the residue.
   function payYield(
     address yieldToken,
     address controller,
@@ -279,8 +244,7 @@ library VaultPolicy {
     OutputToken memory output = order.outputs[0];
     if (output.recipient != ctx.vault) return false;
     if (output.amount == 0 || order.input.amount == 0) return false;
-    // Fixed input only. Also implied by the permit2 digest, stated here so it
-    // does not rest on two files agreeing.
+    // Fixed input only. Implied by the Permit2 digest too, but stated here on purpose.
     if (order.input.maxAmount != order.input.amount) return false;
 
     address inputToken = address(order.input.token);
@@ -316,7 +280,6 @@ library VaultPolicy {
     IOperatorVault src = IOperatorVault(vault);
     (LimitOrder memory order, bytes memory operatorSig, bytes memory riskSig) =
       abi.decode(signature, (LimitOrder, bytes, bytes));
-    if (order.outputs.length != 1) return VaultLib.ERC1271_FAIL;
     if (VaultLib.permit2Digest(order, src.permit2(), block.chainid) != hash) return VaultLib.ERC1271_FAIL;
     address settlement = address(src.settlementAsset());
     address corridor = address(src.corridorAsset());
@@ -324,10 +287,8 @@ library VaultPolicy {
     uint256 quotableS;
     uint256 quotableC;
     if (inputToken == settlement) {
-      // Quoting prices economic inventory, but Permit2 can only pull what is
-      // liquid — pending deposits and reserved payouts share the raw balance
-      // and must never fund a fill. Held funds count only once
-      // `prepareSettlement` has recalled them into the vault.
+      // Quoting prices economic inventory, but Permit2 can only pull what is liquid.
+      // Held funds count once `prepareSettlement` has recalled them.
       quotableS = src.quotableSettlement();
       uint256 liquid = src.liquidSettlement();
       if (liquid < quotableS) quotableS = liquid;
@@ -372,16 +333,15 @@ library VaultPolicy {
     emit IOperatorVault.StrategySignerRotated(previous, next, newTradingEpoch);
   }
 
-  /// @notice Zero withdraws the pending proposal (audit L-03), so a signer
-  ///         the admin no longer wants cannot be activated by a third party
-  ///         once the delay elapses.
+  /// @notice Zero withdraws the pending proposal, so an unwanted signer cannot be activated
+  ///         by a third party once the delay elapses (audit L-03).
   function proposeRiskSigner(VaultTypes.Roles storage roles, address next, uint256 delay) external {
     if (next == address(0)) {
       if (!_clearPendingRiskSigner(roles)) revert VaultErrors.InvalidParams();
       return;
     }
     if (next == roles.strategySigner) revert VaultErrors.InvalidParams();
-    // `delay` passed `_requireSafeDuration`, so the sum fits well inside uint96.
+    // `delay` passed `_requireSafeDuration`, so the sum fits uint96.
     uint96 applyAt = uint96(block.timestamp + delay);
     roles.pendingRiskSigner = next;
     roles.pendingRiskSignerAt = applyAt;
@@ -399,9 +359,8 @@ library VaultPolicy {
     emit IOperatorVault.RiskSignerRotated(previous, next, newTradingEpoch);
   }
 
-  /// @notice Two-step handover (audit L-01): nothing changes until the
-  ///         proposed key calls `acceptOperatorAdmin`; zero withdraws the
-  ///         proposal, so a mistyped one does not stay acceptable forever.
+  /// @notice Two-step handover (audit L-01): nothing changes until the proposed key accepts.
+  ///         Zero withdraws the proposal.
   function proposeOperatorAdmin(VaultTypes.Roles storage roles, address next) external {
     address pending = roles.pendingOperatorAdmin;
     _checkProposal(roles, next, pending);
@@ -410,8 +369,7 @@ library VaultPolicy {
     else emit IOperatorVault.OperatorAdminProposed(next);
   }
 
-  /// @dev Delegatecalled, so `msg.sender` is the account accepting and the
-  ///      factory rekey is made from the vault address.
+  /// @dev Delegatecalled: `msg.sender` is the accepting key and the factory rekey comes from the vault.
   function acceptOperatorAdmin(
     VaultTypes.Roles storage roles,
     address factory,
@@ -450,8 +408,7 @@ library VaultPolicy {
     roles.guardian = next;
   }
 
-  /// @notice Guardian sweep of a non-working ERC-20. Delegatecalled, so the
-  ///         balance and transfer are the vault's own.
+  /// @notice Guardian sweep of a non-working ERC-20. Delegatecalled, so the balance is the vault's.
   function sweepToken(
     address token,
     address to,
@@ -460,9 +417,8 @@ library VaultPolicy {
     address yieldToken
   ) external {
     if (to == address(0)) revert VaultErrors.ZeroAddress();
-    // The aToken (H-01) stays unsweepable alongside the pair and the shares.
-    // `yieldToken` is zero when yield is off; sweeping token(0) is nonsense
-    // either way, so that comparison needs no zero-guard.
+    // The yield token stays unsweepable (audit H-01). It is zero when yield is off, and
+    // sweeping token(0) is nonsense either way.
     if (
       token == address(this) || token == settlementAsset || token == corridorAsset || token == yieldToken
     ) revert VaultErrors.InvalidPair();
@@ -482,8 +438,8 @@ library VaultPolicy {
     emit IOperatorVault.ETHSwept(to, amount);
   }
 
-  /// @dev A proposal either withdraws the pending one (zero, which needs one
-  ///      to exist) or names a fresh key that keeps the two admin roles apart.
+  /// @dev Zero withdraws the pending proposal (which must exist); anything else must keep
+  ///      the two admin roles apart.
   function _checkProposal(VaultTypes.Roles storage roles, address next, address pending) private view {
     if (next == address(0)) {
       if (pending == address(0)) revert VaultErrors.InvalidParams();
@@ -492,23 +448,20 @@ library VaultPolicy {
     }
   }
 
-  /// @dev Only the proposed key can accept, and the separation is re-checked
-  ///      here because the other admin role may have changed since the proposal.
+  /// @dev Only the proposed key can accept. Separation is re-checked because the other
+  ///      admin role may have changed since the proposal.
   function _acceptable(VaultTypes.Roles storage roles, address pending) private view returns (address) {
     if (msg.sender != pending) revert VaultErrors.NotAuthorized();
     _requireDistinctAdmins(roles, pending);
     return pending;
   }
 
-  /// @dev The L-01 invariant: one entity holding both admin roles could rotate
-  ///      both signers and collapse the dual-signature model to a single party.
-  ///      `validateConfig` enforces the same rule on the deploy payload.
+  /// @dev One entity holding both admin roles could rotate both signers and collapse the
+  ///      dual-signature model (audit L-01). `validateConfig` enforces the same at deploy.
   function _requireDistinctAdmins(VaultTypes.Roles storage roles, address next) private view {
     if (next == roles.operatorAdmin || next == roles.riskAdmin) revert VaultErrors.InvalidParams();
   }
 
-  /// @dev Emits the cancellation so an event-driven monitor never keeps a
-  ///      signer and activation time the chain has already dropped.
   function _clearPendingRiskSigner(VaultTypes.Roles storage roles) private returns (bool cleared) {
     address pending = roles.pendingRiskSigner;
     if (pending == address(0)) return false;
@@ -518,8 +471,7 @@ library VaultPolicy {
     return true;
   }
 
-  /// @notice Dual-signed like an order: the attested figures are what the
-  ///         vault converts at, so one key alone must not set them.
+  /// @notice Dual-signed like an order: one key alone must not set the conversion figures.
   function verifyAttestation(
     VaultLib.NavAttestation calldata att,
     bytes calldata strategySignature,
@@ -546,9 +498,6 @@ library VaultPolicy {
     if (d == 0 || d > MAX_TOKEN_DECIMALS) revert VaultErrors.InvalidDecimals();
   }
 
-  /// @dev Epoch timestamps are uint64. Half the width, not `uint64.max - now`:
-  ///      the vault already truncates `block.timestamp` to uint64, so this makes
-  ///      `now + duration` fit by construction rather than only at deploy time.
   function _requireSafeDuration(uint256 duration) private pure {
     if (duration > MAX_DURATION) revert VaultErrors.InvalidParams();
   }

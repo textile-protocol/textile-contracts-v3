@@ -21,16 +21,6 @@ contract VaultLibHarness {
     );
   }
 
-  function convertToAssets(uint256 shares, uint256 supply, uint256 totalAssets, bool roundUp)
-    external
-    pure
-    returns (uint256)
-  {
-    return VaultLib.convertToAssets(
-      shares, supply, totalAssets, roundUp ? Math.Rounding.Ceil : Math.Rounding.Floor
-    );
-  }
-
   function nav(
     uint256 freeSettlement,
     uint256 freeCorridor,
@@ -67,10 +57,6 @@ contract VaultLibHarness {
     returns (uint256 operatorShares, uint256 protocolShares)
   {
     return VaultLib.splitFee(shares, protocolShareWad);
-  }
-
-  function tradingNonce(uint256 epoch, uint256 counter) external pure returns (uint256) {
-    return VaultLib.tradingNonce(epoch, counter);
   }
 
   function epochFromNonce(uint256 nonce) external pure returns (uint256) {

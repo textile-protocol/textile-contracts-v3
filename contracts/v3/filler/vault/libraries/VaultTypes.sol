@@ -6,10 +6,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Constructor / factory payloads for OperatorVault.
 library VaultTypes {
-  /// @notice Admin, signer, and payout roles. Grouped in one storage struct
-  ///         so the admin lifecycle can live in the linked policy library
-  ///         (external library functions mutate it via delegatecall), keeping
-  ///         the vault runtime under the 24kb cap.
+  /// @notice One storage struct so the admin lifecycle can live in the linked library.
   struct Roles {
     address operatorAdmin;
     address pendingOperatorAdmin;
@@ -18,18 +15,15 @@ library VaultTypes {
     address pendingRiskAdmin;
     address riskSigner;
     address pendingRiskSigner;
-    /// @dev Packs with `pendingRiskSigner`: the two are always written and
-    ///      cleared together, so one slot instead of two.
+    /// @dev Packs with `pendingRiskSigner`; the two are always written and cleared together.
     uint96 pendingRiskSignerAt;
     address guardian;
     address feeRecipient;
   }
 
-  /// @notice Caller-supplied vault configuration. The factory fills in
-  ///         reactor, Permit2 and PreferredFillerValidation; the share token
-  ///         strings go to the constructor beside the config.
+  /// @notice Caller-supplied vault configuration. The factory fills in reactor, Permit2 and
+  ///         PreferredFillerValidation.
   struct VaultInit {
-    /// @dev ERC-20 name and symbol of the share token, chosen by the operator.
     string name;
     string symbol;
     IERC20 settlementAsset;
@@ -46,7 +40,6 @@ library VaultTypes {
     uint256 minReserveCorridor;
     uint256 maxOrderLifetime;
     /// @dev Durations run from the epoch opening, timeouts from its close.
-    ///      Only `emergencyExitTimeout > valuationTimeout` is enforced.
     uint256 depositEpochDuration;
     uint256 redemptionEpochDuration;
     uint256 redemptionCloseCooldown;
@@ -60,8 +53,7 @@ library VaultTypes {
     uint256 protocolPerformanceShareWad;
     uint256 riskSignerDelay;
     uint256 minDepositAssets;
-    /// @dev Minimum corridor-asset deposit, in corridor atomic units. Zero
-    ///      disables corridor deposits for the vault's whole life.
+    /// @dev In corridor atomic units. Zero disables corridor deposits for the vault's whole life.
     uint256 minDepositCorridor;
     uint256 minRedeemShares;
     bool enableYield;

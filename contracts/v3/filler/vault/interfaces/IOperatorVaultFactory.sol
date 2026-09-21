@@ -5,27 +5,21 @@ pragma solidity 0.8.30;
 import { VaultTypes } from "../libraries/VaultTypes.sol";
 
 interface IOperatorVaultFactory {
-  /// @notice Deploy a vault for `msg.sender == init.operatorAdmin`. `init.name`
-  ///         and `init.symbol` become the share token's ERC-20 strings: 1 to
-  ///         64 and 1 to 16 bytes respectively, or the deploy reverts.
+  /// @notice Deploy a vault for `msg.sender == init.operatorAdmin`. `init.name` and
+  ///         `init.symbol` are 1 to 64 and 1 to 16 bytes respectively.
   function deployVault(VaultTypes.VaultInit calldata init) external returns (address vault);
 
   function isVault(address vault) external view returns (bool);
 
-  /// @notice Where Textile's cut of every vault's fee accruals is minted.
-  ///         Immutable — a new recipient means a new factory.
+  /// @notice Where Textile's cut of every vault's fee accruals is minted. Immutable.
   function protocolFeeRecipient() external view returns (address);
-  /// @notice The recipient plus `vault`'s own cut of each fee leg (WAD),
-  ///         fixed at deploy. What the vault calls at checkpoint.
+  /// @notice The recipient plus `vault`'s own cut of each fee leg (WAD), fixed at deploy.
   function protocolFeeFor(address vault)
     external
     view
     returns (address recipient, uint256 managementShareWad, uint256 performanceShareWad);
 
-  /// @notice The most recently indexed vault for the tuple, or zero when the
-  ///         operator has none. An operator may hold several — this is the
-  ///         one a caller recovering a lost deploy receipt is looking for.
-  ///         Use `vaultsOf` when you need all of them.
+  /// @notice The most recently indexed vault for the tuple, or zero. Use `vaultsOf` for all of them.
   function vaultOf(address operatorAdmin, address settlementAsset, address corridorAsset)
     external
     view
@@ -37,12 +31,12 @@ interface IOperatorVaultFactory {
     view
     returns (address[] memory);
 
-  /// @notice How many vaults the operator holds for the pair.
   function vaultCountOf(address operatorAdmin, address settlementAsset, address corridorAsset)
     external
     view
     returns (uint256);
 
+  /// @notice Move the calling vault from one operator's index to another's. Vaults only.
   function rekeyOperator(
     address fromAdmin,
     address toAdmin,

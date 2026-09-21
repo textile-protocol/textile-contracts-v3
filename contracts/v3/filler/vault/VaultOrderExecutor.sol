@@ -21,27 +21,11 @@ interface IFeeControllerSource {
 
 /**
  * @title VaultOrderExecutor
- * @notice Stateless fill wrapper for vault orders whose input may sit in the
- *         yield adapter. UniswapX pulls the input via Permit2 before any
- *         callback, so the unstake has to happen before `reactor.execute` —
- *         this contract calls `prepareSettlement`, then executes as the
- *         UniswapX filler: it receives the input and pays the output, both of
- *         which are forwarded to `msg.sender` in the same transaction. It
- *         never holds tokens or native across transactions.
- * @dev Preferred-filler exclusivity is re-imposed at the wrapper. The reactor
- *      sees this contract as the filler, so `PreferredFillerValidation` alone
- *      would let any caller of `fill()` receive the Permit2 input — front-running
- *      the taker whose signed blob is public in the mempool. `fill()` therefore
- *      requires the caller to be one of the order's preferred fillers (the bound
- *      taker); the executor's own slot, present only so the reactor accepts it
- *      as filler, does not count. VaultPolicy forces `exclusiveUntil >= deadline`
- *      on every vault order, so a vault order is taker-exclusive for its whole
- *      fillable life — there is no open window to fall through to.
- * @dev The reactor ends every execute by refunding its whole native balance
- *      to `msg.sender` — here, this contract — and reverts if that fails.
- *      Its `receive()` is open, so anyone can leave 1 wei in it; without a
- *      `receive()` here that wei would revert every `fill()`. So native is
- *      accepted and passed on to the caller, best effort.
+ * @notice Stateless fill wrapper for vault orders whose input may sit in the yield adapter:
+ *         calls `prepareSettlement`, executes as the UniswapX filler, and forwards the input
+ *         and any leftover output to `msg.sender`. Never holds tokens across transactions.
+ * @dev The reactor sees this contract as the filler, so `fill()` re-imposes the order's
+ *      preferred-filler binding itself; otherwise anyone could front-run the bound taker.
  */
 contract VaultOrderExecutor is ReentrancyGuard {
   using SafeERC20 for IERC20;
@@ -50,9 +34,7 @@ contract VaultOrderExecutor is ReentrancyGuard {
   IReactor public immutable reactor;
   IOperatorVaultFactory public immutable factory;
 
-  /// @dev Gas for the best-effort refund pass-through. Enough for a smart
-  ///      wallet's receive(), small enough that a hostile one can't starve
-  ///      the rest of the fill.
+  /// @dev Enough for a smart wallet's receive(), small enough that a hostile one cannot starve the fill.
   uint256 private constant REFUND_GAS = 50_000;
 
   event ExecutorFill(
@@ -72,26 +54,21 @@ contract VaultOrderExecutor is ReentrancyGuard {
     factory = factory_;
   }
 
-  /// @notice Fill a vault LimitOrder. The caller supplies the output token
-  ///         (approved to this contract) and receives the input token. During
-  ///         the order's exclusive window the caller must be a bound preferred
-  ///         filler — see the exclusivity note above.
+  /// @notice Fill a vault LimitOrder. The caller supplies the output token (approved to this
+  ///         contract) and receives the input token.
   /// @param signedOrder abi-encoded LimitOrder plus the vault's ERC-1271 envelope.
   function fill(SignedOrder calldata signedOrder) external nonReentrant {
     LimitOrder memory order = abi.decode(signedOrder.order, (LimitOrder));
     address vault = order.info.swapper;
     if (!factory.isVault(vault)) revert VaultErrors.UnknownVault();
     if (address(order.info.reactor) != address(reactor)) revert VaultErrors.UnsupportedOrder();
-    // Vault policy signs exactly one output; anything else is not a vault order.
     if (order.outputs.length != 1) revert VaultErrors.UnsupportedOrder();
-    // Re-impose taker exclusivity the reactor can't (it sees us as the filler).
     _assertCallerMayFill(order.info.additionalValidationData);
 
     IERC20 inputToken = IERC20(address(order.input.token));
     IERC20 outputToken = IERC20(order.outputs[0].token);
     uint256 outputAmount = order.outputs[0].amount;
-    // The reactor's fee hook appends fee outputs it also pulls from the
-    // filler, so the caller funds the order output plus the fee.
+    // The reactor's fee hook appends fee outputs it also pulls from the filler.
     uint256 totalOutput = outputAmount + _outputFee(order, signedOrder.sig);
 
     // Unstake before the Permit2 pull; only settlement can sit in the adapter.
@@ -104,17 +81,12 @@ contract VaultOrderExecutor is ReentrancyGuard {
     reactor.execute(signedOrder);
     outputToken.forceApprove(address(reactor), 0);
 
-    // Forward the received input and any output leftover — this contract must
-    // end the transaction holding nothing.
     uint256 inputBalance = inputToken.balanceOf(address(this));
     if (inputBalance > 0) inputToken.safeTransfer(msg.sender, inputBalance);
     uint256 outputBalance = outputToken.balanceOf(address(this));
     if (outputBalance > 0) outputToken.safeTransfer(msg.sender, outputBalance);
 
-    // Restake whatever is idle again; no-op when paused or close-only, and
-    // best-effort by design — an Aave-side supply failure (frozen reserve,
-    // supply cap) must not revert a fill the reactor already completed. Idle
-    // just stays liquid until a later allocateIdle succeeds.
+    // Best effort: an Aave-side supply failure must not revert a fill the reactor completed.
     try IOperatorVault(vault).allocateIdle() {} catch {}
     _forwardNative();
 
@@ -126,9 +98,8 @@ contract VaultOrderExecutor is ReentrancyGuard {
   /// @dev Accepts the reactor's end-of-fill refund.
   receive() external payable {}
 
-  /// @dev Pass the reactor's refund on to the caller. Never reverts and gas
-  ///      is capped: a caller that can't take native keeps its fill, and the
-  ///      dust waits here for the next caller who can.
+  /// @dev Never reverts: a caller that cannot take native keeps its fill and the dust waits
+  ///      for the next caller who can.
   function _forwardNative() private {
     uint256 balance = address(this).balance;
     if (balance == 0) return;
@@ -137,14 +108,8 @@ contract VaultOrderExecutor is ReentrancyGuard {
     ok; // best effort
   }
 
-  /// @dev Gate `fill()` on the order's own preferred-filler binding so the
-  ///      permissionless wrapper cannot hand a fill to a front-runner. Binding
-  ///      format matches PreferredFillerValidation: abi.encode(address[]
-  ///      preferredFillers, uint256 exclusiveUntil). The caller must be one of
-  ///      those fillers, i.e. the bound taker; the executor's own slot can never
-  ///      match because this contract never calls its own `fill()`. The
-  ///      exclusiveUntil is ignored: VaultPolicy pins it at or past the order
-  ///      deadline, so the order is never openly fillable while it is live.
+  /// @dev Same binding format as PreferredFillerValidation: abi.encode(address[], uint256).
+  ///      `exclusiveUntil` is ignored because VaultPolicy pins it at or past the deadline.
   function _assertCallerMayFill(bytes memory validationData) private view {
     (address[] memory preferredFillers,) = abi.decode(validationData, (address[], uint256));
     uint256 count = preferredFillers.length;
@@ -154,10 +119,7 @@ contract VaultOrderExecutor is ReentrancyGuard {
     revert VaultErrors.CallerNotPreferredFiller();
   }
 
-  /// @dev Mirrors `ProtocolFees._injectFees`: ask the reactor's fee controller
-  ///      for the fee outputs it will append to this exact resolved order and
-  ///      sum the ones in the order's output token. Fees in any other token
-  ///      are not fundable by this wrapper, so such orders are rejected.
+  /// @dev Mirrors `ProtocolFees._injectFees`. Fees in any other token are not fundable here.
   function _outputFee(LimitOrder memory order, bytes calldata sig) private view returns (uint256 fee) {
     IProtocolFeeController controller = IFeeControllerSource(address(reactor)).feeController();
     if (address(controller) == address(0)) return 0;

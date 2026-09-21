@@ -2,9 +2,8 @@
 // Copyright (c) 2026 Textile, Inc.
 pragma solidity 0.8.30;
 
-/// @notice Minimal vendored slice of the Aave v3 Pool ABI — just what
-///         AaveV3YieldAdapter needs. Struct layout must match Aave's
-///         `DataTypes.ReserveDataLegacy` exactly; only `aTokenAddress` is read.
+/// @notice Vendored slice of the Aave v3 Pool ABI. `ReserveDataLegacy` must match Aave's
+///         layout exactly; only `aTokenAddress` is read.
 interface IAaveV3Pool {
   struct ReserveConfigurationMap {
     uint256 data;
@@ -30,13 +29,12 @@ interface IAaveV3Pool {
 
   function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
 
-  /// @dev `amount == type(uint256).max` withdraws the full aToken balance.
-  ///      Returns the underlying amount actually withdrawn.
+  /// @dev `amount == type(uint256).max` withdraws the full aToken balance. Returns the
+  ///      underlying amount actually withdrawn.
   function withdraw(address asset, uint256 amount, address to) external returns (uint256);
 
   function getReserveData(address asset) external view returns (ReserveDataLegacy memory);
 
-  /// @dev Liquidity index in RAY (1e27), interest accrued up to now included.
-  ///      `aToken.balanceOf` is the scaled balance multiplied by this.
+  /// @dev Liquidity index in RAY, interest accrued up to now included.
   function getReserveNormalizedIncome(address asset) external view returns (uint256);
 }

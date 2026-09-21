@@ -8,16 +8,13 @@ import { VaultLib } from "../libraries/VaultLib.sol";
 
 /**
  * @title IOperatorVault
- * @notice External surface for the RFQ operator vault. Request/claim is
- *         custom: a settled redeem pays settlement and corridor, so
- *         ERC-7540 `deposit`/`mint`/`withdraw`/`redeem` are not implemented.
- *         Preview methods revert — there is no honest preview until an
- *         attestation exists.
+ * @notice External surface for the RFQ operator vault. Request/claim is custom: a settled
+ *         redeem pays settlement and corridor, so ERC-7540 `deposit`/`mint`/`withdraw`/`redeem`
+ *         and the preview methods are not implemented.
  */
 interface IOperatorVault {
-  /// @dev Every vault event lives here: several are emitted from VaultPolicy
-  ///      delegatecalls and would otherwise be missing from the vault ABI,
-  ///      and one home beats two.
+  /// @dev Every vault event lives here: several are emitted from VaultPolicy delegatecalls
+  ///      and would otherwise be missing from the vault ABI.
   event SettlementPrepared(uint256 needed, uint256 recalled);
   event IdleAllocated(uint256 assets);
   event IdleRecalled(uint256 assets);
@@ -38,8 +35,7 @@ interface IOperatorVault {
   event RiskAdminTransferred(address indexed previous, address indexed current);
   event GuardianUpdated(address indexed previous, address indexed current);
   event FeeRecipientUpdated(address indexed previous, address indexed current);
-  /// @notice `previous` is what the constructor (or the last update) set, so
-  ///         the earliest event on a vault names the deploy-time floor.
+  /// @notice The earliest event on a vault names the deploy-time floor as `previous`.
   event MinLiquidSettlementUpdated(uint256 previous, uint256 current);
   event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
   event HighWaterMarkUpdated(uint256 markWad);
@@ -55,26 +51,21 @@ interface IOperatorVault {
     external
     returns (uint256 requestId);
 
-  /// @notice Queue a corridor-asset deposit. Corridor deposits run in their
-  ///         own epochs, sit outside `freeCorridor` until processed, and are
-  ///         then priced at the attested corridor price before minting
-  ///         against the attested NAV like a settlement deposit. Reverts
-  ///         `CorridorDepositsDisabled` when `minDepositCorridor` is zero.
+  /// @notice Queue a corridor-asset deposit. Corridor deposits run in their own epochs, sit
+  ///         outside `freeCorridor` until processed, and are then priced at the attested
+  ///         corridor price. Reverts `CorridorDepositsDisabled` when `minDepositCorridor` is zero.
   function requestDepositCorridor(uint256 assets, address controller, address owner)
     external
     returns (uint256 requestId);
 
   function cancelDeposit(uint256 requestId, address controller) external;
 
-  /// @notice Queue a redemption. Minimum `minRedeemShares`, except for the
-  ///         two fee recipients (operator and protocol) — the floor would
-  ///         strand their dilution residue.
+  /// @notice Queue a redemption. Minimum `minRedeemShares`, except for the two fee recipients.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     returns (uint256 requestId);
 
-  /// @notice Pay a processed or settled request out to `receiver`. The vault
-  ///         itself is refused: the request would be spent for nothing.
+  /// @notice Pay a processed or settled request out to `receiver`. The vault itself is refused.
   function claim(uint256 requestId, address controller, address receiver) external;
 
   function setOperator(address operator, bool approved) external returns (bool);
@@ -90,19 +81,16 @@ interface IOperatorVault {
 
   function voidDepositEpoch(uint256 epochId) external;
 
-  /// @notice Close the open redeem epoch. Bumps the trading epoch (every
-  ///         signed order dies) and holds the vault close-only until the
-  ///         epoch settles. The operator admin and strategy signer may close
-  ///         at any time; anyone else only once the epoch has been open
-  ///         `redemptionEpochDuration + valuationTimeout` and
-  ///         `redemptionCloseCooldown` has passed since the last settle.
+  /// @notice Close the open redeem epoch. Bumps the trading epoch (every signed order dies) and
+  ///         holds the vault close-only until the epoch settles. The operator admin and
+  ///         strategy signer may close at any time; anyone else only once the epoch has been
+  ///         open `redemptionEpochDuration + valuationTimeout` and `redemptionCloseCooldown`
+  ///         has passed since the last settle.
   function closeRedeemEpoch(uint256 epochId) external;
 
-  /// @notice Settle a closed redeem epoch against a dual-signed attestation.
-  ///         Redeemers are paid both assets pro rata to their share of
-  ///         supply, off the attested free balances, so the payout never
-  ///         depends on the corridor price. Settling while paused pays live
-  ///         balances instead, and a full-supply exit requires the pause.
+  /// @notice Settle a closed redeem epoch against a dual-signed attestation. Redeemers are paid
+  ///         both assets pro rata to their share of supply, off the attested free balances.
+  ///         Settling while paused pays live balances instead, and a full-supply exit requires the pause.
   function settleRedeemEpoch(
     uint256 epochId,
     VaultLib.NavAttestation calldata attestation,
@@ -110,72 +98,42 @@ interface IOperatorVault {
     bytes calldata riskSignature
   ) external;
 
-  /// @notice Last-resort in-kind redeem when the signers cannot attest.
-  ///         `emergencyExitTimeout` must have elapsed since the epoch closed.
-  ///         Pauses the vault if the guardian has not already, then pays live
-  ///         free balances, including unattested surplus. Anyone may call, so
-  ///         a silent operator cannot lock converted capital. Attested
-  ///         settlement while paused also pays live, so hostile signers
-  ///         cannot pre-settle a partial epoch at zero and block this path.
-  ///         The adapter recall is best-effort: a position Aave cannot pay
-  ///         back becomes a pro-rata in-kind claim on the yield token,
-  ///         collected at claim time, so a paused or illiquid reserve cannot
-  ///         block this exit. Only the adapter's view reads sit outside that
-  ///         try/catch.
-  /// @param epochId Closed redeem epoch to settle.
+  /// @notice Last-resort in-kind redeem when the signers cannot attest, once
+  ///         `emergencyExitTimeout` has elapsed since the epoch closed. Anyone may call.
+  ///         Pauses the vault if the guardian has not, then pays live free balances. A
+  ///         position the adapter cannot pay back becomes a pro-rata in-kind claim on the
+  ///         yield token, collected at claim time.
   function settleRedeemEmergencyInKind(uint256 epochId) external;
 
-  /// @notice In-kind yield bookkeeping for emergency exits. Both figures are
-  ///         in the adapter's index-invariant scaled units, not face value,
-  ///         so neither goes stale when the position rebases.
-  /// @return weight Unclaimed claim weight over the vault's yield-token
-  ///         balance. Claims split that balance by weight, so interest
-  ///         accruing after settlement follows the claim.
-  /// @return pendingPull Position already owed to redeemers that the external
-  ///         protocol has not let the vault move out of the adapter yet.
-  ///         Excluded from NAV and off-limits to every recall, at whatever it
-  ///         is worth now rather than at what it was worth when it settled.
+  /// @notice In-kind yield bookkeeping for emergency exits, in the adapter's scaled units.
+  /// @return weight Unclaimed claim weight over the vault's yield-token balance.
+  /// @return pendingPull Position owed to redeemers that could not leave the adapter yet.
+  ///         Excluded from NAV and off-limits to every recall.
   function yieldReserves() external view returns (uint256 weight, uint256 pendingPull);
 
-  /// @notice Guardian-only sweep of a non-working ERC-20. Reverts for the
-  ///         vault share token, settlement asset, corridor asset, and yield
-  ///         token (the vault holds yield tokens for redeemers after an
-  ///         emergency exit under an impaired external protocol).
-  /// @param token Token to transfer. Must not be a working asset.
-  /// @param to Recipient. Cannot be the zero address.
+  /// @notice Guardian-only sweep of a non-working ERC-20. Reverts for the share token, both
+  ///         assets, and the yield token.
   function sweepToken(address token, address to) external;
 
   /// @notice Guardian-only sweep of forced-in ETH.
-  /// @param to Recipient. Cannot be the zero address or this vault.
   function sweepETH(address payable to) external;
 
-  /// @notice Recall enough settlement from the yield adapter so at least
-  ///         `needed` sits liquid in the vault. No-op when already covered.
-  ///         Reverts with `InsufficientSettlement` when the recall comes up
-  ///         short. Anyone may call; fillers call it before a Permit2 pull.
-  /// @dev Not atomic with a later fill: between a prepare and a direct
-  ///      `reactor.execute`, anyone can call `allocateIdle` and restake the
-  ///      recalled settlement, making the fill revert. That is griefing only —
-  ///      no funds are at risk — and costs the caller gas each block. Fill
-  ///      through `VaultOrderExecutor.fill`, which prepares and executes in
-  ///      one transaction, when that matters.
-  /// @param needed Liquid settlement the caller is about to pull.
+  /// @notice Recall enough settlement from the yield adapter so at least `needed` sits liquid.
+  ///         Reverts `InsufficientSettlement` when the recall comes up short. Anyone may call.
+  /// @dev Not atomic with a later fill: anyone can `allocateIdle` in between and make the fill
+  ///      revert. Griefing only; fill through `VaultOrderExecutor.fill` when that matters.
   function prepareSettlement(uint256 needed) external;
 
-  /// @notice Supply idle settlement above `minLiquidSettlement` to the yield
-  ///         adapter. No-op when the adapter is unset, the vault is paused, or
-  ///         close-only. Anyone may call — including between someone else's
-  ///         `prepareSettlement` and their fill (see the note there).
+  /// @notice Supply idle settlement above `minLiquidSettlement` to the yield adapter. No-op
+  ///         when the adapter is unset, the vault is paused, or close-only. Anyone may call.
   function allocateIdle() external;
 
-  /// @notice Recall the full adapter position back to the vault. No-op when
-  ///         nothing is held. Anyone may call; redeem settlement runs it first.
+  /// @notice Recall the full adapter position back to the vault. Anyone may call.
   function recallAll() external;
 
   function settlementAsset() external view returns (IERC20);
-  /// @notice The OperatorVaultFactory that deployed this vault. Immutable;
-  ///         it carries the protocol's fee cut and the implementation
-  ///         `VERSION()`, which the vault does not keep its own copy of.
+  /// @notice The OperatorVaultFactory that deployed this vault. Carries the protocol fee cut
+  ///         and the implementation `VERSION()`.
   function factory() external view returns (address);
   function corridorAsset() external view returns (IERC20);
   function reactor() external view returns (address);
@@ -199,13 +157,13 @@ interface IOperatorVault {
   function closeOnly() external view returns (bool);
   /// @notice Economic free settlement: liquid plus the adapter position.
   function freeSettlement() external view returns (uint256);
-  /// @notice Settlement sitting in the vault net of pending and reserved —
-  ///         the only balance Permit2 can pull from. ERC-1271 caps settlement
-  ///         input here; `prepareSettlement` first to count held funds.
+  /// @notice Settlement in the vault net of pending and reserved: the only balance Permit2
+  ///         can pull from. `prepareSettlement` first to count held funds.
   function liquidSettlement() external view returns (uint256);
   /// @notice Corridor net of pending deposits and reserved payouts.
   function freeCorridor() external view returns (uint256);
   function quotableSettlement() external view returns (uint256);
   function quotableCorridor() external view returns (uint256);
+  /// @notice Last settled NAV, not a live mark.
   function totalAssets() external view returns (uint256);
 }

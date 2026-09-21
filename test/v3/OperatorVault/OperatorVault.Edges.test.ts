@@ -66,7 +66,7 @@ describe('OperatorVault — remaining edges', function () {
     await seedShares(ctx, ctx.lp1)
     await expect(
       ctx.vault.connect(ctx.lp2).requestRedeem(usdt(200n), ctx.lp1.address, ctx.lp1.address)
-    ).to.be.revertedWithCustomError(ctx.vault, 'NotAuthorized')
+    ).to.be.revertedWithCustomError(ctx.vault, 'ERC20InsufficientAllowance')
   })
 
   it('rejects claim and cancel with a zero receiver or missing request', async function () {

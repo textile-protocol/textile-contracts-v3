@@ -5,51 +5,41 @@ pragma solidity 0.8.30;
 import { Clones } from "@openzeppelin/contracts/proxy/Clones.sol";
 
 import { IOperatorVaultFactory } from "./interfaces/IOperatorVaultFactory.sol";
-import { IYieldAdapter } from "./interfaces/IYieldAdapter.sol";
 import { VaultDeployer } from "./libraries/VaultDeployer.sol";
 import { VaultErrors } from "./libraries/VaultErrors.sol";
 import { VaultTypes } from "./libraries/VaultTypes.sol";
 
 /**
  * @title OperatorVaultFactory
- * @notice Deploys immutable OperatorVault bytecode. An operator may hold any
- *         number of vaults for the same (settlement, corridor) pair — a pair
- *         is a market, not a slot, and one operator running two books on it
- *         (different caps, epochs or risk signer) is an ordinary thing to
- *         want. The factory indexes them per (operatorAdmin, settlement,
- *         corridor, version) tuple in deployment order. Holds no assets and
- *         has no upgrade authority over deployed vaults.
+ * @notice Deploys immutable OperatorVaults. An operator may hold any number of vaults for the
+ *         same (settlement, corridor) pair; the factory indexes them per (operatorAdmin,
+ *         settlement, corridor, version) in deployment order. Holds no assets and has no
+ *         authority over deployed vaults.
  */
 contract OperatorVaultFactory is IOperatorVaultFactory {
   uint256 public constant VERSION = 3;
   uint256 public constant MAX_NAME_BYTES = 64;
   uint256 public constant MAX_SYMBOL_BYTES = 16;
-  /// @notice The protocol may take at most half of either fee leg. A
-  ///         fat-fingered deploy cannot mint a vault that hands it all over.
+  /// @notice The protocol may take at most half of either fee leg.
   uint256 public constant MAX_PROTOCOL_FEE_SHARE_WAD = 5e17;
 
   address public immutable reactor;
   address public immutable permit2;
   address public immutable preferredFillerValidation;
-  /// @notice Yield adapter implementation cloned per vault. Zero = this
-  ///         factory cannot enable idle yield.
+  /// @notice Yield adapter implementation cloned per vault. Zero = yield cannot be enabled.
   address public immutable yieldAdapterImplementation;
-  /// @notice Where Textile's cut of every vault's fee accruals is minted.
-  ///         Immutable, exactly like a SellFirstFeeController rotation, so no
+  /// @notice Where Textile's cut of every vault's fee accruals is minted. Immutable, so no
   ///         key can redirect fees on a live vault.
   address public immutable override protocolFeeRecipient;
 
-  /// @notice Textile's cut of each fee leg, set per vault at deploy and never
-  ///         changed. The vault reads it back at every checkpoint.
+  /// @notice Textile's cut of each fee leg, fixed per vault at deploy.
   struct ProtocolTerms {
     uint128 managementShareWad;
     uint128 performanceShareWad;
   }
   mapping(address => ProtocolTerms) private _protocolTerms;
 
-  /// @dev Vaults per (operatorAdmin, settlement, corridor, VERSION), oldest
-  ///      first. Append-only apart from `rekeyOperator`, which moves a single
-  ///      entry from one key's list to another's.
+  /// @dev Vaults per (operatorAdmin, settlement, corridor, VERSION), oldest first.
   mapping(bytes32 => address[]) private _vaultsOf;
   mapping(address => bool) public override isVault;
 
@@ -111,6 +101,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     ) revert VaultErrors.InvalidParams();
     bytes32 key = _key(init.operatorAdmin, address(init.settlementAsset), address(init.corridorAsset));
 
+    // The vault constructor binds the clone to itself, or reverts.
     address adapter;
     if (init.enableYield) {
       if (yieldAdapterImplementation == address(0)) revert VaultErrors.YieldNotSupported();
@@ -150,11 +141,6 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     });
 
     vault = VaultDeployer.deploy(cfg, init.name, init.symbol);
-    // Defense in depth: unreachable today (the vault constructor binds the
-    // clone or reverts), but pins the invariant if the constructor changes.
-    if (adapter != address(0) && IYieldAdapter(adapter).vault() != vault) {
-      revert VaultErrors.InvalidParams();
-    }
     _vaultsOf[key].push(vault);
     isVault[vault] = true;
     // Both fit uint128: capped at 5e17 above.
@@ -172,8 +158,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
       init.name,
       init.symbol
     );
-    // After VaultDeployed: the subgraph creates the vault on that event and
-    // fills the terms in on this one.
+    // After VaultDeployed: the subgraph creates the vault on that event and fills the terms in on this one.
     emit ProtocolTermsSet(vault, init.protocolManagementShareWad, init.protocolPerformanceShareWad);
   }
 
@@ -206,40 +191,30 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   }
 
   /// @inheritdoc IOperatorVaultFactory
+  /// @dev Only a vault this factory deployed may call, so the list walked is its own
+  ///      operator's, bounded by what that operator paid to deploy.
   function rekeyOperator(
     address fromAdmin,
     address toAdmin,
     address settlementAsset,
     address corridorAsset
   ) external {
-    // Bounds the loop below: only a vault this factory deployed may call, so
-    // the list walked is its own operator's, paid for one deployment at a time.
     if (!isVault[msg.sender]) revert VaultErrors.NotAuthorized();
     if (toAdmin == address(0) || fromAdmin == toAdmin) revert VaultErrors.InvalidParams();
     address[] storage from = _vaultsOf[_key(fromAdmin, settlementAsset, corridorAsset)];
     uint256 index = _indexOf(from, msg.sender);
 
-    // Order-preserving removal rather than swap-and-pop: `vaultOf` answers
-    // with the last entry, and the caller reading it is recovering the deploy
-    // whose receipt it lost, so that has to stay the newest vault instead of
-    // whichever one a swap happened to move into place. The list only holds
-    // vaults this operator paid to deploy, so the shift is bounded by their
-    // own spend.
+    // Order-preserving removal, not swap-and-pop: `vaultOf` must keep answering with the newest vault.
     for (uint256 i = index; i + 1 < from.length; ++i) {
       from[i] = from[i + 1];
     }
     from.pop();
 
-    // No duplicate check on the destination: an operator holding several
-    // vaults for one pair is the point, and a handover must not be blocked by
-    // the new admin already running their own book on the same market.
+    // No duplicate check on the destination: holding several vaults for one pair is allowed.
     _vaultsOf[_key(toAdmin, settlementAsset, corridorAsset)].push(msg.sender);
     emit VaultRekeyed(msg.sender, fromAdmin, toAdmin, settlementAsset, corridorAsset);
   }
 
-  /// @dev Position of `vault` in `vaults`. Reverts `NotAuthorized` when it is
-  ///      absent, which is a vault asking to be moved off a key it was never
-  ///      indexed under — not reachable through `acceptOperatorAdmin` today.
   function _indexOf(address[] storage vaults, address vault) private view returns (uint256) {
     uint256 length = vaults.length;
     for (uint256 i = 0; i < length; ++i) {
@@ -248,9 +223,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     revert VaultErrors.NotAuthorized();
   }
 
-  /// @dev Share-token strings are the operator's to choose, within bounds
-  ///      wallets and explorers render sanely. Uniqueness is not enforced:
-  ///      the vault address is the identity, the strings are a label.
+  /// @dev Uniqueness is not enforced: the vault address is the identity, the strings are a label.
   function _requireLabel(string calldata label, uint256 maxBytes) private pure {
     uint256 length = bytes(label).length;
     if (length == 0 || length > maxBytes) revert VaultErrors.InvalidParams();

@@ -8,12 +8,11 @@ import { WAD } from './fixtures/operatorVault.fixture'
 import { deployOperatorVault, signDigest } from './fixtures/operatorVault.fixture'
 
 describe('VaultLib', function () {
-  it('converts shares and assets with the +1 virtual offset', async function () {
+  it('converts assets to shares with the +1 virtual offset', async function () {
     const { harness } = await deployOperatorVault()
     expect(await harness.convertToShares(1000, 0, 0, false)).to.equal(1000)
-    expect(await harness.convertToAssets(1000, 0, 0, false)).to.equal(1000)
     expect(await harness.convertToShares(500, 1000, 1000, false)).to.equal(500)
-    expect(await harness.convertToAssets(500, 1000, 1000, true)).to.equal(500)
+    expect(await harness.convertToShares(500, 1000, 1000, true)).to.equal(500)
   })
 
   it('computes NAV and quotable inventory', async function () {
@@ -84,11 +83,11 @@ describe('VaultLib', function () {
     }
   })
 
-  it('packs and unpacks the trading epoch in the Permit2 nonce', async function () {
+  it('reads the trading epoch out of a TS-built Permit2 nonce', async function () {
     const { harness } = await deployOperatorVault()
-    const nonce = await harness.tradingNonce(7, 99)
+    const nonce = math.tradingNonce(7n, 99n)
     expect(await harness.epochFromNonce(nonce)).to.equal(7)
-    expect(nonce & ((1n << 128n) - 1n)).to.equal(99)
+    expect(nonce & ((1n << 128n) - 1n)).to.equal(99n)
   })
 
   it('gives the last claimant the residue', async function () {
@@ -113,7 +112,6 @@ describe('VaultLib', function () {
     expect(await harness.feeShares(1000n, WAD / 10n, math.YEAR)).to.equal(
       math.feeShares(1000n, WAD / 10n, math.YEAR)
     )
-    expect(await harness.tradingNonce(4n, 8n)).to.equal(math.tradingNonce(4n, 8n))
     expect(await harness.proRataWithResidue(2n, 5n, 11n)).to.equal(
       math.proRataWithResidue(2n, 5n, 11n)
     )

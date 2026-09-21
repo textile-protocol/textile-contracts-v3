@@ -12,12 +12,9 @@ import { IAaveV3Pool } from "./IAaveV3Pool.sol";
 
 /**
  * @title AaveV3YieldAdapter
- * @notice Puts a vault's idle settlement balance into an Aave v3 market. One
- *         implementation per market; the factory clones it per vault and the
- *         vault binds the clone in its constructor, so there is no front-run
- *         window. The adapter holds only aTokens — never the vault's working
- *         balance — and has no admin surface: `skim` is its only recovery
- *         path, and it can only push to the vault.
+ * @notice Puts a vault's idle settlement into an Aave v3 market. One implementation per market;
+ *         the factory clones it per vault and the vault binds the clone in its constructor.
+ *         Holds only aTokens and has no admin surface: `skim` can only push to the vault.
  */
 contract AaveV3YieldAdapter is IYieldAdapter {
   using SafeERC20 for IERC20;
@@ -52,7 +49,6 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   /// @inheritdoc IYieldAdapter
   function initialize(address vault_, address asset_) external override {
     if (vault != address(0)) revert VaultErrors.AlreadyInitialized();
-    if (vault_ == address(0) || asset_ == address(0)) revert VaultErrors.ZeroAddress();
     if (msg.sender != vault_) revert VaultErrors.NotAuthorized();
     address aTokenAddress = pool.getReserveData(asset_).aTokenAddress;
     if (aTokenAddress == address(0)) revert VaultErrors.ZeroAddress();
@@ -91,31 +87,19 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   }
 
   /// @inheritdoc IYieldAdapter
-  /// @dev aToken face value is the scaled balance times the liquidity index,
-  ///      so dividing by the index is exactly what `scaledBalanceOf` stores.
   function toScaled(uint256 assets) external view override returns (uint256) {
     return Math.mulDiv(assets, RAY, pool.getReserveNormalizedIncome(asset));
   }
 
   /// @inheritdoc IYieldAdapter
-  /// @dev Rounds up so a reserve derived from this can never sit under what
-  ///      it is reserving. The overshoot is at most a wei, and `transferHeld`
-  ///      clamps, so it costs nothing.
   function fromScaled(uint256 scaled) external view override returns (uint256) {
     return Math.mulDiv(scaled, pool.getReserveNormalizedIncome(asset), RAY, Math.Rounding.Ceil);
   }
 
   /// @inheritdoc IYieldAdapter
-  /// @dev No event: the vault's `YieldPullSynced` already records `sent` in
-  ///      the same transaction, and `to` is always the vault, so an
-  ///      adapter-level copy would be a second source of truth for one fact.
-  ///      aTokens transfer at face value, so `assets` is also the aToken
-  ///      amount — but the round trip through Aave's scaled math is lossy.
-  ///      `withdraw` burns `amount.rayDiv(index)`, which rounds up, so a
-  ///      recall that means to leave a reserve behind can land an atomic unit
-  ///      under it. Transferring the caller's recorded figure would then
-  ///      revert forever and freeze the claim it was reserved for, so the
-  ///      request is clamped to what the position actually holds.
+  /// @dev Clamped: Aave's `withdraw` burns `amount.rayDiv(index)` rounded up, so a recall that
+  ///      leaves a reserve behind can land an atomic unit under it. No event; the vault's
+  ///      `YieldPullSynced` records `sent`.
   function transferHeld(address to, uint256 assets) external override onlyVault returns (uint256 sent) {
     IERC20 token = aToken;
     sent = Math.min(assets, token.balanceOf(address(this)));
@@ -123,9 +107,7 @@ contract AaveV3YieldAdapter is IYieldAdapter {
   }
 
   /// @inheritdoc IYieldAdapter
-  /// @dev Also refuses the implementation: it locks `vault` to itself, so a
-  ///      skim there would be a self-transfer reporting a recovery that never
-  ///      happened.
+  /// @dev Also refuses the implementation, whose `vault` is itself.
   function skim(address token) external override {
     address vault_ = vault;
     if (vault_ == address(this) || token == address(aToken)) revert VaultErrors.InvalidPair();

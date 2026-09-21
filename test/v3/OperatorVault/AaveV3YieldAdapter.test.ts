@@ -61,7 +61,7 @@ describe('AaveV3YieldAdapter', function () {
     ).to.be.revertedWithCustomError(adapter, 'NotAuthorized')
     await expect(
       adapter.connect(eoaVault).initialize(ethers.ZeroAddress, assetAddr)
-    ).to.be.revertedWithCustomError(adapter, 'ZeroAddress')
+    ).to.be.revertedWithCustomError(adapter, 'NotAuthorized')
 
     await expect(adapter.connect(eoaVault).initialize(eoaVault.address, assetAddr))
       .to.emit(adapter, 'AdapterInitialized')
@@ -78,14 +78,13 @@ describe('AaveV3YieldAdapter', function () {
     ).to.be.revertedWithCustomError(adapter, 'AlreadyInitialized')
   })
 
-  // Both zero guards run before the caller check, so an EOA can reach them on
-  // a fresh clone (audit v0.3 N-14).
+  // A zero vault can never be the caller, and a zero asset has no aToken reserve.
   it('rejects initialize with a zero vault or a zero asset', async function () {
     const { adapter, eoaVault, asset } = await deploy()
 
     await expect(
       adapter.connect(eoaVault).initialize(ethers.ZeroAddress, await asset.getAddress())
-    ).to.be.revertedWithCustomError(adapter, 'ZeroAddress')
+    ).to.be.revertedWithCustomError(adapter, 'NotAuthorized')
     await expect(
       adapter.connect(eoaVault).initialize(eoaVault.address, ethers.ZeroAddress)
     ).to.be.revertedWithCustomError(adapter, 'ZeroAddress')

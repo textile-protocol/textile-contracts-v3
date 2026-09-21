@@ -93,14 +93,6 @@ describe('OperatorVault — deposits', function () {
     )
   })
 
-  it('reverts preview helpers', async function () {
-    const { vault } = await deployOperatorVault()
-    await expect(vault.previewDeposit(1)).to.be.revertedWithCustomError(vault, 'PreviewUnsupported')
-    await expect(vault.previewMint(1)).to.be.revertedWithCustomError(vault, 'PreviewUnsupported')
-    await expect(vault.previewWithdraw(1)).to.be.revertedWithCustomError(vault, 'PreviewUnsupported')
-    await expect(vault.previewRedeem(1)).to.be.revertedWithCustomError(vault, 'PreviewUnsupported')
-  })
-
   it('rejects a replayed or wrong-vault attestation', async function () {
     const ctx = await deployOperatorVault()
     await ctx.vault.connect(ctx.lp1).requestDeposit(usdt(100n), ctx.lp1.address, ctx.lp1.address)

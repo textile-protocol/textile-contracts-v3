@@ -17,21 +17,17 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
 
 /**
  * @title OperatorVault
- * @notice Immutable two-asset RFQ maker vault. LPs hold ERC-20 shares. The
- *         operator only signs constrained LimitOrders; Permit2 cannot move
- *         tokens without a vault-validated ERC-1271 envelope. Deposits and
- *         redemptions settle in aggregate epochs. LPs may deposit either
- *         asset: settlement and corridor deposits queue in separate epochs,
- *         and a corridor epoch is priced at the attested corridor price when
- *         it is processed. Redemptions always pay both assets pro rata. One
- *         closed redemption at a time; pause is an orthogonal flag over
- *         derived close-only mode.
+ * @notice Immutable two-asset RFQ maker vault. LPs hold ERC-20 shares. The operator
+ *         only signs constrained LimitOrders, validated through ERC-1271 before Permit2
+ *         can pull. Deposits (settlement or corridor, separate epochs) and redemptions
+ *         settle in aggregate epochs against a dual-signed NAV attestation. Redemptions
+ *         pay both assets pro rata. One closed redeem epoch at a time puts the vault in
+ *         close-only mode; pause is an independent flag on top.
  */
 contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, VaultErrors {
   using SafeERC20 for IERC20;
 
-  /// @dev Order matters: `claim` treats `Processed` and everything after it
-  ///      as claimable, so a new state goes before `Processed` unless it is.
+  /// @dev `claim` treats `Processed` and everything after it as claimable.
   enum EpochState {
     None,
     Open,
@@ -47,10 +43,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint64 openedAt;
     uint64 cutoff;
     uint64 closedAt;
-    /// @dev Deposit epochs only: units are corridor, not settlement.
+    /// @dev Deposit epochs only: `units` are corridor, not settlement.
     bool inCorridor;
-    /// @dev Queued into the epoch: deposit assets for a deposit epoch, shares
-    ///      for a redeem epoch. `remainingUnits` is the same net of claims.
+    /// @dev Queued assets for a deposit epoch, shares for a redeem epoch.
     uint256 units;
     uint256 shares;
     uint256 remainingUnits;
@@ -88,17 +83,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   uint8 public immutable corridorDecimals;
   /// @notice Optional idle-yield adapter for the settlement asset. Zero = off.
   IYieldAdapter public immutable yieldAdapter;
-  /// @notice Liquid settlement floor `allocateIdle` never supplies below.
-  ///         Storage, not immutable: the operator admin retunes it with
-  ///         `setMinLiquidSettlement` as the book's fill sizes change. It
-  ///         only shapes what idle goes to the adapter — never what an order
-  ///         may pull or what a redeemer is paid.
+  /// @notice Liquid settlement `allocateIdle` never supplies below. Shapes what idle
+  ///         goes to the adapter only, never what an order may pull or a redeemer is paid.
   uint256 public minLiquidSettlement;
-  /// @notice Token the adapter position is held in (e.g. the aToken). Zero
-  ///         when yield is off. Paid out in kind by the emergency exit when
-  ///         the underlying cannot be recalled. Not public: the auto-getter
-  ///         costs more bytecode than this contract has to spare, and the
-  ///         value is `yieldAdapter().yieldToken()` off-chain.
+  /// @dev Token the adapter position is held in (e.g. the aToken). Zero when yield is off.
+  ///      Not public: bytecode budget. Read `yieldAdapter().yieldToken()` off-chain.
   address internal immutable yieldToken;
 
   VaultTypes.Roles private _roles;
@@ -119,24 +108,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   uint256 public pendingCorridor;
   uint256 public reservedSettlement;
   uint256 public reservedCorridor;
-  /// @notice Sum of the unclaimed `Epoch.remainingYield` weights. The in-kind
-  ///         yield leg is a weight, not an amount: claims split the vault's
-  ///         live yield-token balance by weight, so interest that accrues
-  ///         between an emergency settle and the last claim follows the claim
-  ///         and the last claimant out sweeps the residue. Weights are
-  ///         denominated in the adapter's index-invariant scaled units
-  ///         (`IYieldAdapter.toScaled`), so two epochs that settled at
-  ///         different liquidity indices still split the pot by what each is
-  ///         actually owed rather than by stale face values.
+  /// @dev Sum of unclaimed `Epoch.remainingYield`. A weight over the live yield-token
+  ///      balance, in the adapter's scaled units, so accrual after settlement follows the claim.
   uint256 internal outstandingYieldWeight;
-  /// @notice Position an emergency exit owes redeemers but could not move out
-  ///         of the adapter yet. Aave blocks aToken transfers on a paused
-  ///         reserve exactly like it blocks withdrawals, so settlement books
-  ///         the claim and the tokens cross on the first adapter touch that
-  ///         works. Excluded from NAV until then.
-  ///
-  ///         Scaled, like `outstandingYieldWeight`, because the slice keeps
-  ///         rebasing inside the adapter. Read it through `_owedAssets`.
+  /// @dev Scaled position an emergency exit owes redeemers but could not move out of the
+  ///      adapter yet. Excluded from NAV. Face value via `_owedAssets`.
   uint256 internal pendingYieldPull;
 
   mapping(uint256 => Epoch) public epochs;
@@ -157,8 +133,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     address indexed controller, address indexed owner, uint256 indexed requestId, address sender, uint256 shares
   );
   event EpochClosed(uint256 indexed epochId, bool isDeposit, uint256 units);
-  /// @dev `price` is the risk-signed corridor price the epoch converted at.
-  ///      An empty epoch converts nothing and reports `(0, 0, 0)`.
+  /// @dev `price` is the attested corridor price the epoch converted at; an empty epoch reports zeros.
   event DepositEpochProcessed(uint256 indexed epochId, uint256 assets, uint256 shares, uint256 price);
   event DepositEpochVoided(uint256 indexed epochId);
   event RedeemEpochSettled(uint256 indexed epochId, uint256 shares, uint256 settlementOut, uint256 corridorOut);
@@ -231,8 +206,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     cfg.settlementAsset.forceApprove(cfg.permit2, type(uint256).max);
     cfg.corridorAsset.forceApprove(cfg.permit2, type(uint256).max);
 
-    // Bind the freshly cloned adapter in the same factory tx — no front-run
-    // window. Only the settlement asset is ever approved; never the Aave pool.
+    // Bound in the factory tx, so there is no front-run window on the fresh clone.
     yieldToken = cfg.yieldAdapter == address(0)
       ? address(0)
       : VaultPolicy.bindYieldAdapter(cfg.yieldAdapter, cfg.settlementAsset);
@@ -263,9 +237,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Refunds the controller, not the depositing owner — the ERC-7540
-  ///      controller model (the owner authorises, the controller holds the
-  ///      request rights). Mind this when wiring `owner != controller`.
+  /// @dev Refunds the controller, not the depositing owner (ERC-7540 controller model).
   function cancelDeposit(uint256 requestId, address controller) external override nonReentrant {
     Epoch storage epoch = epochs[requestId];
     if (!epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
@@ -287,8 +259,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     Epoch storage epoch = epochs[epochId];
     if (!epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
     if (block.timestamp < epoch.cutoff) revert VaultErrors.EpochNotReady();
-    // Only one can match; branching on `inCorridor` to skip the other SLOAD
-    // costs more bytecode than the vault has (audit v0.2 §6 Code 3).
+    // At most one matches; branching on `inCorridor` costs more bytecode than both compares.
     if (currentDepositEpochId == epochId) currentDepositEpochId = 0;
     if (currentCorridorDepositEpochId == epochId) currentCorridorDepositEpochId = 0;
     _closeEpoch(epochId, epoch);
@@ -305,32 +276,25 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     Epoch storage epoch = _closedEpoch(epochId, true);
     if (epoch.units == 0) {
       epoch.state = EpochState.Processed;
-      // Price 0, not `attestation.corridorAssetPrice`: this branch returns
-      // before `verifyAttestation`, so the struct is unsigned caller input and
-      // anyone could emit any price into the log (audit I-01). Nothing
-      // converted here, so there is no price to report anyway.
+      // The attestation is unverified on this path, so its price must not reach the log.
       emit DepositEpochProcessed(epochId, 0, 0, 0);
       return;
     }
 
     // NAV before the checkpoint, supply after: this epoch converts at the post-fee price.
-    (uint256 price, uint256 conversionNav,,,) =
-      _verifiedLiveNav(epochId, attestation, strategySignature, riskSignature);
-    _checkpointFee(conversionNav);
+    (uint256 price,,,) = _verifiedLiveNav(epochId, attestation, strategySignature, riskSignature);
+    _checkpointFee(attestation.nav);
 
     uint256 supply = totalSupply();
     uint256 assets = epoch.units;
     bool inCorridor = epoch.inCorridor;
-    // Corridor is valued at the signed price first, then converts like settlement.
     uint256 value =
       inCorridor ? VaultLib.nav(0, assets, price, settlementDecimals, corridorDecimals) : assets;
-    // Convert against the NAV the shares actually own. With no supply that is
-    // nothing: the epoch mints at its own value and any surplus already here
-    // (a donation, leftover dust) is NAV its depositors share pro rata. Using
-    // the signed NAV instead let a bare transfer between close and process
-    // shrink the epoch to one share and zero every claim (audit H-02).
+    // With no supply the epoch mints at its own value; any surplus already here becomes NAV
+    // its depositors share. Converting against the signed NAV instead let a bare transfer
+    // between close and process shrink the epoch to one share (audit H-02).
     uint256 shares =
-      VaultLib.convertToShares(value, supply, supply == 0 ? 0 : conversionNav, Math.Rounding.Floor);
+      VaultLib.convertToShares(value, supply, supply == 0 ? 0 : attestation.nav, Math.Rounding.Floor);
     if (shares == 0) revert VaultErrors.ZeroAmount();
 
     _releasePending(inCorridor, assets);
@@ -345,15 +309,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Races `processDepositEpoch` once `valuationTimeout` elapses:
-  ///      whoever lands first wins. Voiding only refunds depositors their own
-  ///      settlement, so there is no loss either way — size the timeout
-  ///      comfortably past the operator's expected processing window.
-  ///
-  ///      No key, no pause check, works while wedged — one of the two exits
-  ///      that always hold (`settleRedeemEmergencyInKind` is the other, after
-  ///      its timeout). Keep it that way: together they are why an abandoned
-  ///      vault is not a permanent lock.
+  /// @dev No key, no pause check, works while wedged: with `settleRedeemEmergencyInKind`
+  ///      this is why an abandoned vault is never a permanent lock. Races
+  ///      `processDepositEpoch` once `valuationTimeout` elapses; either outcome is lossless.
   function voidDepositEpoch(uint256 epochId) external override {
     Epoch storage epoch = _closedEpoch(epochId, true);
     _requireElapsed(epoch.closedAt, valuationTimeout);
@@ -366,11 +324,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   //////////////////////////////////////////////////////////////*/
 
   /// @inheritdoc IOperatorVault
-  /// @dev Deliberately no pause check, unlike `requestDeposit`: exits must
-  ///      always be able to queue; only new capital is blocked while paused.
-  ///      Both fee recipients are exempt from `minRedeemShares`: their
-  ///      positions are pure dilution residue, and there is no other way out
-  ///      of the vault.
+  /// @dev No pause check: exits must always be able to queue.
   function requestRedeem(uint256 shares, address controller, address owner)
     external
     override
@@ -388,26 +342,17 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Closing bumps the trading epoch and puts the vault in close-only
-  ///      mode until the epoch settles, so the trigger belongs to the
-  ///      operator. The admin and the strategy signer close whenever they
-  ///      like: no duration, no cooldown. Anyone else is the backstop for an
-  ///      inattentive operator and waits `valuationTimeout` on top of the
-  ///      duration, the same grace the operator gets to process a deposit
-  ///      epoch before it becomes voidable. Without that grace a single
-  ///      `minRedeemShares` holder could force a re-quote of the whole book
-  ///      every cycle (audit v0.2 L-02).
+  /// @dev The operator closes whenever it likes. Anyone else waits `valuationTimeout` on
+  ///      top of the duration, otherwise one `minRedeemShares` holder could force a
+  ///      re-quote of the whole book every cycle (audit v0.2 L-02).
   function closeRedeemEpoch(uint256 epochId) external override {
     if (closedRedeemEpochId != 0) revert VaultErrors.RedeemEpochOutstanding();
     Epoch storage epoch = epochs[epochId];
     if (epoch.isDeposit || epoch.state != EpochState.Open) revert VaultErrors.EpochNotOpen();
     if (msg.sender != _roles.operatorAdmin && msg.sender != _roles.strategySigner) {
-      uint256 publicWindow;
-      // Both terms passed `_requireSafeDuration`, so the sum fits.
-      unchecked {
-        publicWindow = redemptionEpochDuration + valuationTimeout;
+      if (!_durationElapsed(epoch.openedAt, redemptionEpochDuration + valuationTimeout)) {
+        revert VaultErrors.EpochNotReady();
       }
-      if (!_durationElapsed(epoch.openedAt, publicWindow)) revert VaultErrors.EpochNotReady();
       if (lastRedeemSettledAt != 0 && !_durationElapsed(lastRedeemSettledAt, redemptionCloseCooldown)) {
         revert VaultErrors.CloseCooldownActive();
       }
@@ -428,47 +373,32 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ) external override nonReentrant {
     Epoch storage epoch = _closedEpoch(epochId, false);
     _recallAll();
-    (uint256 price, uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC) =
+    (uint256 price, uint256 liveNav, uint256 freeS, uint256 freeC) =
       _verifiedLiveNav(epochId, attestation, strategySignature, riskSignature);
-    // Paused pays live balances (below), so the fee is charged on live NAV too.
+    // Paused pays live balances, so the fee is charged on live NAV too.
     bool isPaused = paused;
-    _checkpointFee(isPaused ? liveNav : conversionNav);
+    _checkpointFee(isPaused ? liveNav : attestation.nav);
     uint256 supply = totalSupply();
 
     uint256 shares = epoch.units;
-    // Snapshot pro-rata while anyone else still holds shares, so a UniswapX
-    // input pull above the attested floors cannot inflate this epoch's take.
-    // Last-claimer live payout is only safe after pause (ERC-1271 dead).
-    // Unpaused last-exit would underpay redeemers mid-fill and stamp the
-    // swap output as orphaned NAV. When paused, use live as the floor so
-    // hostile signers cannot settle a partial epoch at 0 and lock out
-    // `settleRedeemEmergencyInKind`.
+    // Unpaused: pay off the attested floors so an in-flight Permit2 pull cannot inflate the
+    // take, and refuse a full-supply exit (it would stamp the swap output as orphaned NAV).
+    // Paused: ERC-1271 is dead, so live is the floor and hostile signers cannot settle a
+    // partial epoch at 0 to lock out `settleRedeemEmergencyInKind`.
     if (shares == supply && !isPaused) revert VaultErrors.PauseRequired();
     uint256 floorS = isPaused ? freeS : attestation.freeSettlement;
     uint256 floorC = isPaused ? freeC : attestation.freeCorridor;
-    // No zero guard: a closed redeem epoch always carries shares.
     uint256 settlementOut = Math.mulDiv(floorS, shares, supply);
     uint256 corridorOut = Math.mulDiv(floorC, shares, supply);
     _finishRedeemSettle(epochId, epoch, settlementOut, corridorOut, price);
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Last-resort exit when the signers cannot attest. Pays live free
-  ///      balances, including unattested surplus, so it pauses first if the
-  ///      guardian has not: an unpaused split could race a Permit2 pull.
-  ///      The recall and the yield-token transfer are best-effort: whatever
-  ///      Aave will not pay back is booked as a pro-rata in-kind claim on the
-  ///      yield token, collected at claim time (see `pendingYieldPull`). The
-  ///      adapter's views (`held`, `toScaled`, `fromScaled`) are still read
-  ///      outside the try/catch, so a pool whose views revert blocks this
-  ///      exit too (audit v0.2 L-03).
+  /// @dev Pauses first if the guardian has not: an unpaused split could race a Permit2 pull.
   function settleRedeemEmergencyInKind(uint256 epochId) external override nonReentrant {
     Epoch storage epoch = _closedEpoch(epochId, false);
     _requireElapsed(epoch.closedAt, emergencyExitTimeout);
     if (!paused) _pause();
-    // Best-effort: never reverts on the adapter, and returns only the free
-    // part of what it could not bring back — a slice a previous emergency
-    // exit already owes redeemers is left alone and not resold here.
     uint256 stranded = VaultPolicy.tryRecallAllIdle(yieldAdapter, _owedAssets());
 
     _checkpointFee(0);
@@ -481,8 +411,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint256 corridorOut = Math.mulDiv(freeC, shares, supply);
     uint256 yieldOut = Math.mulDiv(stranded, shares, supply);
     if (yieldOut > 0) {
-      // Scaled: `yieldOut` is priced at this settlement's index, and both the
-      // weight and the reserve have to survive the index moving under them.
+      // Scaled so the weight and the reserve survive the index moving under them.
       uint256 weight = yieldAdapter.toScaled(yieldOut);
       epoch.remainingYield = weight;
       outstandingYieldWeight += weight;
@@ -499,8 +428,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   //////////////////////////////////////////////////////////////*/
 
   /// @inheritdoc IOperatorVault
-  /// @dev Single claim path for deposits and redemptions. Redeems pay both
-  ///      assets, so this cannot be ERC-7540 `withdraw`/`redeem`.
   function claim(uint256 requestId, address controller, address receiver) external override nonReentrant {
     if (receiver == address(0) || controller == address(0)) revert VaultErrors.ZeroAddress();
     if (receiver == address(this)) revert VaultErrors.InvalidParams();
@@ -559,17 +486,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   //////////////////////////////////////////////////////////////*/
 
   /// @inheritdoc IOperatorVault
-  /// @dev Strict: reverts unless the vault ends with at least `needed` liquid,
-  ///      so an Aave-side shortfall (even 1 wei of rounding) cannot let a fill
-  ///      pull against a short balance.
   function prepareSettlement(uint256 needed) external override nonReentrant {
     VaultPolicy.prepareIdle(yieldAdapter, _liquidSettlement(), needed, _owedAssets());
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Only idle settlement above `minLiquidSettlement` is supplied.
-  ///      Pending deposits and reserved payouts are excluded from liquid, so
-  ///      they can never end up in Aave. Corridor is never supplied.
   function allocateIdle() external override nonReentrant {
     if (address(yieldAdapter) == address(0)) return;
     VaultPolicy.allocateIdle(yieldAdapter, _liquidSettlement(), minLiquidSettlement, paused || closeOnly());
@@ -581,32 +502,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /*//////////////////////////////////////////////////////////////
-                              PREVIEWS
-  //////////////////////////////////////////////////////////////*/
-
-  function previewDeposit(uint256) external pure returns (uint256) {
-    revert VaultErrors.PreviewUnsupported();
-  }
-
-  function previewMint(uint256) external pure returns (uint256) {
-    revert VaultErrors.PreviewUnsupported();
-  }
-
-  function previewWithdraw(uint256) external pure returns (uint256) {
-    revert VaultErrors.PreviewUnsupported();
-  }
-
-  function previewRedeem(uint256) external pure returns (uint256) {
-    revert VaultErrors.PreviewUnsupported();
-  }
-
-  /*//////////////////////////////////////////////////////////////
                               ERC-1271
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Validates a two-signature vault envelope at fill time.
-  /// @dev Reaches Aave via `_freeSettlement()`, so a reverting pool/aToken view
-  ///      fails every fill, not just the yield paths.
+  /// @dev Reads the adapter via `_freeSettlement()`, so a reverting Aave view fails every fill.
   function isValidSignature(bytes32 hash, bytes calldata signature) external view override returns (bytes4) {
     if (paused) return VaultLib.ERC1271_FAIL;
     return VaultPolicy.validateEnvelope(hash, signature, address(this));
@@ -640,9 +540,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     VaultPolicy.acceptRiskSigner(_roles, _bumpTradingEpoch());
   }
 
-  /// @notice Two-step transfer: the new admin must accept, so a fat-finger or
-  ///         hostile proposal cannot hand control over irrevocably. Proposing
-  ///         the zero address withdraws the pending proposal.
+  /// @notice Two-step: the new admin must accept. Proposing zero withdraws the proposal.
   function transferOperatorAdmin(address next) external onlyOperatorAdmin {
     VaultPolicy.proposeOperatorAdmin(_roles, next);
   }
@@ -653,7 +551,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     );
   }
 
-  /// @notice Two-step transfer, mirroring `transferOperatorAdmin`.
+  /// @notice Two-step, mirroring `transferOperatorAdmin`.
   function transferRiskAdmin(address next) external onlyRiskAdmin {
     VaultPolicy.proposeRiskAdmin(_roles, next);
   }
@@ -681,20 +579,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     VaultPolicy.setGuardian(_roles, next);
   }
 
-  /// @notice Retune the liquid floor. Same rule as `validateConfig`: a vault
-  ///         without an adapter has no floor to tune. A no-op write is
-  ///         refused so every event marks a change and the verification
-  ///         rewind can trust `previous`.
-  /// @dev Bounded blast radius by design: zero sends every idle unit to the
-  ///      adapter (more Aave exposure, nothing leaves the vault), a huge
-  ///      value switches yield off. Pause halts allocation and `recallAll` is
-  ///      open to anyone, so either direction can be undone without this
-  ///      role. No trading-epoch bump: the floor is not part of order
-  ///      validation, so in-flight orders stay valid. Raising it does not
-  ///      recall: `prepareSettlement` only covers the fill in front of it,
-  ///      so liquid reaches the new floor through `recallAll` (after which
-  ///      `allocateIdle` re-supplies only what sits above it) or through
-  ///      fresh settlement inflows.
+  /// @notice Retune the liquid floor. A no-op write is refused so every event marks a change.
+  /// @dev No trading-epoch bump: the floor is not part of order validation. Raising it does
+  ///      not recall; liquid reaches the new floor through `recallAll` or fresh inflows.
   function setMinLiquidSettlement(uint256 next) external onlyOperatorAdmin {
     uint256 previous = minLiquidSettlement;
     if (address(yieldAdapter) == address(0) || next == previous) revert VaultErrors.InvalidParams();
@@ -702,8 +589,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     emit MinLiquidSettlementUpdated(previous, next);
   }
 
-  /// @dev Guarded because it mints via `_checkpointFee`; the other setters
-  ///      write one word and call nothing, so they are not.
+  /// @dev Guarded because it mints via `_checkpointFee`; the other setters call nothing.
   function setFeeRecipient(address next) external onlyOperatorAdmin nonReentrant {
     if (next == address(0)) revert VaultErrors.ZeroAddress();
     if (next == address(this)) revert VaultErrors.InvalidParams();
@@ -794,12 +680,11 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Last settled NAV, not a live mark. Preview methods revert instead.
   function totalAssets() public view override returns (uint256) {
     return lastSettledNav;
   }
 
-  /// @notice Share units track settlement atomic units, so decimals match the asset.
+  /// @notice Shares track settlement atomic units, so decimals match the asset.
   function decimals() public view override returns (uint8) {
     return settlementDecimals;
   }
@@ -838,30 +723,25 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     else pendingSettlement -= assets;
   }
 
-  /// @dev Cancel and voided-claim refunds, in the asset that came in.
   function _refundPending(bool inCorridor, address to, uint256 assets) private {
     _releasePending(inCorridor, assets);
     (inCorridor ? corridorAsset : settlementAsset).safeTransfer(to, assets);
   }
 
+  /// @dev A past-cutoff epoch is skipped, not returned, so deposits never wait on a close.
   function _openOrCurrentDepositEpoch(bool inCorridor) private returns (uint256 id) {
     id = inCorridor ? currentCorridorDepositEpochId : currentDepositEpochId;
-    // Past-cutoff epochs are skipped, not returned: deposits open a fresh
-    // epoch instead of bricking until someone calls closeDepositEpoch.
     if (id != 0 && epochs[id].state == EpochState.Open && block.timestamp < epochs[id].cutoff) {
       return id;
     }
     id = nextEpochId++;
     if (inCorridor) currentCorridorDepositEpochId = id;
     else currentDepositEpochId = id;
-    // Durations are capped at half the uint64 range, so the sum always fits.
+    // Durations are capped at half the uint64 range, so the sum fits.
     _openEpoch(id, true, inCorridor, uint64(block.timestamp + depositEpochDuration));
   }
 
-  /// @dev No cutoff: the epoch never closes itself, so it stays Open until
-  ///      someone calls `closeRedeemEpoch`. That is why the close keeps a
-  ///      permissionless backstop — someone has to close an epoch the
-  ///      operator walked away from.
+  /// @dev No cutoff: a redeem epoch stays Open until `closeRedeemEpoch`.
   function _openOrCurrentRedeemEpoch() private returns (uint256 id) {
     id = currentRedeemEpochId;
     if (id != 0 && epochs[id].state == EpochState.Open) return id;
@@ -870,18 +750,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     _openEpoch(id, false, false, 0);
   }
 
-  /// @dev `id` is never reused, so the slot is virgin and only non-zero fields need writing.
   function _openEpoch(uint256 id, bool isDeposit, bool inCorridor, uint64 cutoff) private {
     Epoch storage epoch = epochs[id];
     epoch.state = EpochState.Open;
     epoch.isDeposit = isDeposit;
     epoch.openedAt = uint64(block.timestamp);
-    if (cutoff != 0) epoch.cutoff = cutoff;
-    if (inCorridor) epoch.inCorridor = true;
+    epoch.cutoff = cutoff;
+    epoch.inCorridor = inCorridor;
   }
 
-  /// @dev Shared tail of both closes. Bytes matter here: see
-  ///      `OperatorVault.Size.test.ts`.
   function _closeEpoch(uint256 id, Epoch storage epoch) private {
     epoch.state = EpochState.Closed;
     epoch.closedAt = uint64(block.timestamp);
@@ -909,18 +786,13 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     emit RedeemEpochSettled(epochId, shares, settlementOut, corridorOut);
   }
 
+  /// @dev Price zero is the emergency path: leftover settlement only.
   function _recordSettledNav(uint256 price) private {
-    // price == 0 is the emergency path: leftover settlement only.
     uint256 settled = price == 0 ? _freeSettlement() : _nav(price);
     lastSettledNav = settled;
     emit NavSettled(settled, block.timestamp);
   }
 
-  /// @dev One accrual, two recipients. The operator leg plus the protocol leg
-  ///      is exactly the dilution LPs bore before the split existed; see
-  ///      `VaultPolicy.feeAccrual`. Textile's cut lives on the factory, which
-  ///      is immutable and has no owner, and `factory` is immutable here, so
-  ///      nothing can point this at a different source.
   /// @param navAssets Attested NAV; zero on the unpriced paths skips the performance leg.
   function _checkpointFee(uint256 navAssets) private {
     uint256 elapsed = block.timestamp - lastFeeCheckpoint;
@@ -942,10 +814,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     emit FeeAccrued(recipient, shares, elapsed);
   }
 
-  /// @dev `startedAt` is always a past block timestamp, so the subtraction
-  ///      cannot underflow.
   function _durationElapsed(uint256 startedAt, uint256 duration) private view returns (bool) {
     return block.timestamp - startedAt >= duration;
+  }
+
+  function _requireElapsed(uint256 since, uint256 timeout) private view {
+    if (!_durationElapsed(since, timeout)) revert VaultErrors.TimeoutNotReached();
   }
 
   /// @dev Kills ERC-1271 and every outstanding order.
@@ -961,15 +835,13 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     }
   }
 
-  /// @dev Settlement actually sitting in the vault, net of pending deposits
-  ///      and reserved payouts. The only balance Permit2 can pull from.
+  /// @dev Settlement in the vault net of pending deposits and reserved payouts. The only
+  ///      balance Permit2 can pull from.
   function _liquidSettlement() private view returns (uint256) {
     return settlementAsset.balanceOf(address(this)) - pendingSettlement - reservedSettlement;
   }
 
-  /// @dev The adapter position net of value an emergency exit already
-  ///      promised redeemers but could not move out yet — that slice stopped
-  ///      backing live shares the moment the epoch settled.
+  /// @dev Adapter position net of the slice an emergency exit already promised redeemers.
   function _heldSettlement() private view returns (uint256) {
     if (address(yieldAdapter) == address(0)) return 0;
     uint256 held = yieldAdapter.held();
@@ -977,27 +849,19 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     return held > owed ? held - owed : 0;
   }
 
-  /// @dev Economic free settlement: liquid plus the adapter position. NAV,
-  ///      quotable, and attestation floors all price the full inventory.
-  ///      Hot path: `isValidSignature` hits this on every fill, so Aave's
-  ///      views sit inside the Permit2 pull.
+  /// @dev Economic free settlement: liquid plus the adapter position. Hot path: every fill
+  ///      validation reads it.
   function _freeSettlement() private view returns (uint256) {
     return _liquidSettlement() + _heldSettlement();
   }
 
-  function _requireElapsed(uint256 since, uint256 timeout) private view {
-    if (!_durationElapsed(since, timeout)) revert VaultErrors.TimeoutNotReached();
-  }
-
-  /// @dev Every settlement path starts from the same guard.
   function _closedEpoch(uint256 epochId, bool isDeposit) private view returns (Epoch storage epoch) {
     epoch = epochs[epochId];
     if (epoch.isDeposit != isDeposit || epoch.state != EpochState.Closed) revert VaultErrors.EpochNotClosed();
   }
 
-  /// @dev The deferred slice at today's face value. Zero short-circuits, so
-  ///      the ordinary path — and `_freeSettlement`, which every fill
-  ///      validation hits — never pays for the conversion.
+  /// @dev The deferred slice at today's face value. Zero short-circuits so the ordinary
+  ///      path never pays for the conversion.
   function _owedAssets() private view returns (uint256) {
     uint256 owed = pendingYieldPull;
     return owed == 0 ? 0 : yieldAdapter.fromScaled(owed);
@@ -1005,27 +869,19 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   function _recallAll() private {
     if (address(yieldAdapter) == address(0)) return;
-    // Drain the deferred slice first so a recall that can reach it does, and
-    // the reserve it has to leave behind shrinks to nothing.
+    // Drain the deferred slice first so the reserve the recall leaves behind shrinks.
     _syncPendingYield();
     VaultPolicy.recallAllIdle(yieldAdapter, _owedAssets());
   }
 
-  /// @dev Best-effort pull of the deferred slice. Never reverts, so nothing
-  ///      Aave does can block the caller. Silence means it is still stuck:
-  ///      `RedeemYieldSettled` with no matching `YieldPullSynced`.
+  /// @dev Best-effort pull of the deferred slice. Never reverts.
   function _syncPendingYield() private {
     uint256 owed = _owedAssets();
     if (owed == 0) return;
     if (VaultPolicy.syncPendingYield(yieldAdapter, owed)) pendingYieldPull = 0;
   }
 
-  /// @dev Pay the in-kind yield leg. `weight` is a share of
-  ///      `outstandingYieldWeight`, not an amount, so claimants split the live
-  ///      balance and rebasing follows the claim. Splitting a face-value
-  ///      balance by scaled weights is exact, since face value is scaled
-  ///      units times one index shared by every holder. A slice still stuck
-  ///      in the adapter is pulled first; if it will not move the claim
+  /// @dev A slice still stuck in the adapter is pulled first; if it will not move the claim
   ///      reverts rather than burning the weight against a short pool.
   function _payYield(address controller, address receiver, uint256 epochId, uint256 weight) private {
     _syncPendingYield();
@@ -1035,8 +891,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     VaultPolicy.payYield(yieldToken, controller, receiver, epochId, weight, outstanding);
   }
 
-  /// @dev Corridor net of reserved payouts and pending deposits. The only
-  ///      corridor a fill can sell.
+  /// @dev Corridor net of reserved payouts and pending deposits. The only corridor a fill can sell.
   function _freeCorridor() private view returns (uint256) {
     return corridorAsset.balanceOf(address(this)) - reservedCorridor - pendingCorridor;
   }
@@ -1051,28 +906,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     return VaultLib.nav(_freeSettlement(), _freeCorridor(), priceWad, settlementDecimals, corridorDecimals);
   }
 
-  /// @dev Verifies the attestation, then checks it against live state. One
-  ///      function for both epoch paths, which keeps the vault under the
-  ///      bytecode cap.
-  ///      Attestations bind `lastSettledNav` so a prior epoch cannot be
-  ///      replayed after settlement. Live free balances and live NAV must be
-  ///      at least the signed snapshot: a UniswapX input pull that eats
-  ///      attested inventory reverts. Surplus (donations, completed fills) is
-  ///      allowed so it cannot grief settlement, but conversion uses the
-  ///      signed NAV — live `balanceOf` can drop in `executeWithCallback`
-  ///      while still sitting above the floors. Surplus is marked in
-  ///      afterwards via `_recordSettledNav`. A bootstrap deposit epoch
-  ///      ignores the signed NAV altogether: see `processDepositEpoch`.
+  /// @dev Binds the attestation to `lastSettledNav` so a prior epoch cannot be replayed, and
+  ///      requires live balances and NAV at or above the signed snapshot. Surplus is allowed
+  ///      so it cannot grief settlement; `_recordSettledNav` marks it in afterwards.
   function _verifiedLiveNav(
     uint256 epochId,
     VaultLib.NavAttestation calldata att,
     bytes calldata strategySignature,
     bytes calldata riskSignature
-  )
-    private
-    view
-    returns (uint256 priceWad, uint256 conversionNav, uint256 liveNav, uint256 freeS, uint256 freeC)
-  {
+  ) private view returns (uint256 priceWad, uint256 liveNav, uint256 freeS, uint256 freeC) {
     priceWad = VaultPolicy.verifyAttestation(att, strategySignature, riskSignature, epochId, address(this));
     if (att.lastSettledNav != lastSettledNav) revert VaultErrors.InvalidAttestation();
     freeS = _freeSettlement();
@@ -1080,7 +922,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     liveNav = VaultLib.nav(freeS, freeC, priceWad, settlementDecimals, corridorDecimals);
     if (liveNav < att.nav) revert VaultErrors.InconsistentNav();
     if (freeS < att.freeSettlement || freeC < att.freeCorridor) revert VaultErrors.InconsistentNav();
-    conversionNav = att.nav;
   }
 
   function _requireAuthorized(address account) private view {
@@ -1088,11 +929,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   function _pullShares(address owner, uint256 shares) private {
-    if (owner != msg.sender && !isOperator[owner][msg.sender]) {
-      uint256 allowed = allowance(owner, msg.sender);
-      if (allowed < shares) revert VaultErrors.NotAuthorized();
-      _spendAllowance(owner, msg.sender, shares);
-    }
+    if (owner != msg.sender && !isOperator[owner][msg.sender]) _spendAllowance(owner, msg.sender, shares);
     _transfer(owner, address(this), shares);
   }
 }

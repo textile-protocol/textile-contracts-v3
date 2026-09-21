@@ -9,7 +9,6 @@ import { MessageHashUtils } from "@openzeppelin/contracts/utils/cryptography/Mes
 import { LimitOrder, LimitOrderLib } from "../../vendor/uniswapx/lib/LimitOrderLib.sol";
 
 /// @notice Pure math and digest helpers for OperatorVault.
-///         Share conversion matches OpenZeppelin ERC-4626 (+1 virtual offset).
 library VaultLib {
   using LimitOrderLib for LimitOrder;
 
@@ -17,6 +16,7 @@ library VaultLib {
   uint256 internal constant YEAR = 365 days;
   /// @notice Largest dilution one fee checkpoint may charge, WAD.
   uint256 internal constant MAX_FEE_ACCRUAL_WAD = 5e17;
+  /// @notice Permit2 nonce layout: trading epoch in the upper 128 bits, quote counter below.
   uint256 internal constant EPOCH_NONCE_SHIFT = 128;
   bytes4 internal constant ERC1271_FAIL = 0xffffffff;
 
@@ -55,9 +55,8 @@ library VaultLib {
     uint256 validUntil;
   }
 
-  /// @dev The +1 offset bounds donation inflation on a near-empty vault. It is
-  ///      not a check on `totalAssets`, which on the deposit path is the
-  ///      co-signed attested NAV, not a balance read (audit v0.2 H-01).
+  /// @notice ERC-4626 conversion with the +1 virtual offset, which bounds donation inflation
+  ///         on a near-empty vault. `totalAssets` is the attested NAV, not a balance read.
   function convertToShares(uint256 assets, uint256 supply, uint256 totalAssets, Math.Rounding rounding)
     internal
     pure
@@ -66,16 +65,7 @@ library VaultLib {
     return Math.mulDiv(assets, supply + 1, totalAssets + 1, rounding);
   }
 
-  function convertToAssets(uint256 shares, uint256 supply, uint256 totalAssets, Math.Rounding rounding)
-    internal
-    pure
-    returns (uint256)
-  {
-    return Math.mulDiv(shares, totalAssets + 1, supply + 1, rounding);
-  }
-
-  /// @notice Settlement-denominated NAV. `priceWad` is WAD-scaled settlement
-  ///         tokens per one corridor token. Decimals are constructor-capped at 18.
+  /// @notice Settlement-denominated NAV. `priceWad` is WAD settlement per one corridor token.
   function nav(
     uint256 freeSettlement,
     uint256 freeCorridor,
@@ -97,10 +87,8 @@ library VaultLib {
     return freeBalance - minReserve;
   }
 
-  /// @notice Management-fee mint, grossed up by `1 - f` so the dilution it
-  ///         causes is exactly `f` and not `f / (1 + f)`. Audit v0.2 I-02.
-  ///         The clamp keeps the denominator positive; it binds only on a
-  ///         vault left uncheckpointed for years near the rate cap.
+  /// @notice Management-fee mint, grossed up by `1 - f` so the dilution is exactly `f` and
+  ///         not `f / (1 + f)`. The clamp keeps the denominator positive.
   function feeShares(uint256 supply, uint256 feeWad, uint256 elapsed) internal pure returns (uint256) {
     if (supply == 0 || feeWad == 0 || elapsed == 0) return 0;
     uint256 accrual = feeWad * elapsed;
@@ -109,10 +97,7 @@ library VaultLib {
     return Math.mulDiv(supply, accrual, WAD * YEAR - accrual);
   }
 
-  /// @notice Split one fee accrual between the operator and the protocol.
-  ///         The protocol leg rounds down and the operator keeps the dust, so
-  ///         the two always sum to `shares` exactly: the LP-side dilution is
-  ///         `feeShares` regardless of how it is divided.
+  /// @notice Split one fee accrual. The protocol leg rounds down, the operator keeps the dust.
   function splitFee(uint256 shares, uint256 protocolShareWad)
     internal
     pure
@@ -122,8 +107,7 @@ library VaultLib {
     operatorShares = shares - protocolShares;
   }
 
-  /// @notice `feeWad` of the NAV above the mark, minted against post-fee NAV;
-  ///         the cap below 100% keeps the denominator positive.
+  /// @notice `feeWad` of the NAV above the mark, minted against post-fee NAV.
   function performanceFeeShares(uint256 navAssets, uint256 supply, uint256 markWad, uint256 feeWad)
     internal
     pure
@@ -143,16 +127,11 @@ library VaultLib {
     return Math.max(markWad, Math.mulDiv(navAssets, WAD, supply));
   }
 
-  /// @notice Permit2 nonce: trading epoch in the upper 128 bits, quote counter below.
-  function tradingNonce(uint256 epoch, uint256 counter) internal pure returns (uint256) {
-    return (epoch << EPOCH_NONCE_SHIFT) | counter;
-  }
-
   function epochFromNonce(uint256 nonce) internal pure returns (uint256) {
     return nonce >> EPOCH_NONCE_SHIFT;
   }
 
-  /// @notice Last-claimer residue: if this is the last unit, take the remainder.
+  /// @notice Pro rata, except the last unit takes the whole remainder.
   function proRataWithResidue(uint256 claimUnits, uint256 remainingUnits, uint256 remainingOut)
     internal
     pure

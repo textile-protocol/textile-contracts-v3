@@ -5,10 +5,8 @@ pragma solidity 0.8.30;
 import { OperatorVault } from "../OperatorVault.sol";
 import { VaultTypes } from "./VaultTypes.sol";
 
-/// @notice Linked library that carries the OperatorVault creation bytecode so
-///         the factory runtime stays under the 24kb cap. Runs as a delegatecall
-///         from the factory: the vault is created from the factory address and
-///         sees the factory as `msg.sender`, exactly as a direct `new` would.
+/// @notice Linked library carrying the OperatorVault creation code so the factory stays under
+///         the 24kb cap. Delegatecalled, so the vault sees the factory as `msg.sender`.
 library VaultDeployer {
   function deploy(VaultTypes.VaultConfig calldata cfg, string calldata name, string calldata symbol)
     external
