@@ -161,24 +161,26 @@ library VaultPolicy {
   /// @notice Fold a processed deposit into the basket leg it arrived in: the basket's value grows
   ///         by exactly the epoch's value, so the new shares carry none of the gain deferred before them.
   /// @param supply Supply before `shares` were minted.
+  /// @param attestedS Settlement floor the checkpoint that just ran priced.
+  /// @param attestedC Corridor floor the checkpoint that just ran priced.
   function absorbDeposit(
     VaultTypes.BasketMark storage basket,
     uint256 markWad,
     uint256 supply,
     uint256 shares,
     uint256 assets,
-    bool inCorridor
+    bool inCorridor,
+    uint256 attestedS,
+    uint256 attestedC
   ) external {
-    uint256 basketS;
-    uint256 basketC;
-    if (basket.settlementWad == 0 && basket.corridorWad == 0) {
-      // A fresh basket takes the whole post-mint inventory.
-      IOperatorVault self = IOperatorVault(address(this));
-      (basketS, basketC) = (self.freeSettlement(), self.freeCorridor());
-    } else {
-      basketS = VaultLib.perShareTotal(basket.settlementWad, supply) + (inCorridor ? 0 : assets);
-      basketC = VaultLib.perShareTotal(basket.corridorWad, supply) + (inCorridor ? assets : 0);
-    }
+    // A fresh basket starts from the floors the checkpoint priced, not from live inventory:
+    // surplus that arrived after the attestation was signed stays chargeable gain instead of
+    // being folded in unpriced (audit F-05).
+    bool fresh = basket.settlementWad == 0 && basket.corridorWad == 0;
+    uint256 basketS = fresh ? attestedS : VaultLib.perShareTotal(basket.settlementWad, supply);
+    uint256 basketC = fresh ? attestedC : VaultLib.perShareTotal(basket.corridorWad, supply);
+    if (inCorridor) basketC += assets;
+    else basketS += assets;
     _storeMarks(basket, true, basketS, basketC, supply + shares, markWad, markWad);
   }
 

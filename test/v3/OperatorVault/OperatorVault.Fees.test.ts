@@ -16,6 +16,7 @@ import {
 import type { DeployedVault } from './fixtures/operatorVault.fixture'
 import {
   closeAndSettleRedeem,
+  closeDeposit,
   closeRedeem,
   exitAll,
   seedCorridorShares,
@@ -807,7 +808,7 @@ describe('OperatorVault — performance fee', function () {
       expect(await basketOf(ctx)).to.deep.equal({ settlementWad: 0n, corridorWad: 0n })
     })
 
-    it('initialises a fresh basket to the post-mint inventory and charges nothing on it', async function () {
+    it('initialises a fresh basket to the attested inventory and charges nothing on it', async function () {
       const ctx = await seeded()
       await emptyOut(ctx)
       await ctx.vault.connect(ctx.guardian).unpause()
@@ -822,6 +823,38 @@ describe('OperatorVault — performance fee', function () {
       await ctx.vault.connect(ctx.lp2).requestRedeem(usdt(1n), ctx.lp2.address, ctx.lp2.address)
       await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId())
       expect(await perfMinted(ctx)).to.equal(0)
+    })
+
+    it('leaves a surplus that arrives after the attestation chargeable on a fresh basket', async function () {
+      const ctx = await seeded()
+      await emptyOut(ctx)
+      await ctx.vault.connect(ctx.guardian).unpause()
+
+      await ctx.vault
+        .connect(ctx.lp2)
+        .requestDeposit(usdt(100_000n), ctx.lp2.address, ctx.lp2.address)
+      const depositId = await closeDeposit(ctx)
+      // Signed over an empty vault; the 10k lands before the epoch is processed, so the
+      // checkpoint never prices it (audit F-05).
+      const att = await freshAttestation(ctx.vault, depositId, PRICE_1)
+      const sigs = await attestationSignatures(ctx, att)
+      await gain(ctx, usdt(10_000n))
+      await ctx.vault.processDepositEpoch(depositId, att, ...sigs)
+      await ctx.vault.connect(ctx.lp2).claim(depositId, ctx.lp2.address, ctx.lp2.address)
+
+      // The basket is the deposit alone, not the 110k sitting in the vault.
+      const supply = await ctx.vault.totalSupply()
+      expect(await basketOf(ctx)).to.deep.equal({
+        settlementWad: math.basketPerShare(usdt(100_000n), supply),
+        corridorWad: 0n,
+      })
+
+      const due = await outlook(ctx, PRICE_1)
+      expect(due.basketGain).to.equal(usdt(10_000n))
+      expect(due.shares).to.be.gt(0)
+      await ctx.vault.connect(ctx.lp2).requestRedeem(usdt(1n), ctx.lp2.address, ctx.lp2.address)
+      await closeAndSettleRedeem(ctx, await ctx.vault.currentRedeemEpochId())
+      expect(await perfMinted(ctx)).to.equal(due.shares)
     })
 
     it('folds a deposit after a wind-down residue into the basket without charging', async function () {

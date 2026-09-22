@@ -305,7 +305,16 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
     _releasePending(inCorridor, assets);
     _mint(address(this), shares);
-    VaultPolicy.absorbDeposit(basketMark, highWaterMarkWad, supply, shares, assets, inCorridor);
+    VaultPolicy.absorbDeposit(
+      basketMark,
+      highWaterMarkWad,
+      supply,
+      shares,
+      assets,
+      inCorridor,
+      attestation.freeSettlement,
+      attestation.freeCorridor
+    );
 
     epoch.shares = shares;
     epoch.remainingUnits = assets;
