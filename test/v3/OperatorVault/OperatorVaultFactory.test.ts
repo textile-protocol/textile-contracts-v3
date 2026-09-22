@@ -338,6 +338,37 @@ describe('OperatorVaultFactory', function () {
     ).to.be.revertedWithCustomError(deployed.factory, 'NotAuthorized')
   })
 
+  // The isVault gate passes here, so `_indexOf` is the check that fires. No vault this
+  // factory deployed can get here — `acceptOperatorAdmin` only ever passes the vault's own
+  // pair and the admin it is indexed under — so the caller has to be impersonated.
+  it('rejects rekeyOperator from a vault on a key it was never indexed under', async function () {
+    const deployed = await deployOperatorVault()
+    const vaultAddr = await deployed.vault.getAddress()
+    expect(await deployed.factory.isVault(vaultAddr)).to.equal(true)
+
+    await ethers.provider.send('hardhat_impersonateAccount', [vaultAddr])
+    await ethers.provider.send('hardhat_setBalance', [vaultAddr, '0x1000000000000000000'])
+    const asVault = await ethers.getSigner(vaultAddr)
+    const settlement = await deployed.settlement.getAddress()
+    const corridor = await deployed.corridor.getAddress()
+
+    // Right pair, an operator admin the vault was never indexed under.
+    await expect(
+      deployed.factory
+        .connect(asVault)
+        .rekeyOperator(deployed.other.address, deployed.lp1.address, settlement, corridor)
+    ).to.be.revertedWithCustomError(deployed.factory, 'NotAuthorized')
+
+    // Right operator admin, a pair the vault was never deployed for.
+    await expect(
+      deployed.factory
+        .connect(asVault)
+        .rekeyOperator(deployed.operatorAdmin.address, deployed.other.address, corridor, settlement)
+    ).to.be.revertedWithCustomError(deployed.factory, 'NotAuthorized')
+
+    await ethers.provider.send('hardhat_stopImpersonatingAccount', [vaultAddr])
+  })
+
   it('rejects deployVault from anyone other than operatorAdmin', async function () {
     const deployed = await deployOperatorVault()
     const init = defaultInit(deployed)

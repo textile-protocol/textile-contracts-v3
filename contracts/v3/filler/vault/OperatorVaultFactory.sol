@@ -193,7 +193,10 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
 
   /// @inheritdoc IOperatorVaultFactory
   /// @dev Only a vault this factory deployed may call, so the list walked is its own
-  ///      operator's, bounded by what that operator paid to deploy.
+  ///      operator's, bounded by what that operator paid to deploy. The one caller,
+  ///      `VaultPolicy.acceptOperatorAdmin`, passes the vault's own immutable pair and the
+  ///      admin it is indexed under, which is the key `deployVault` pushed it onto, so
+  ///      `_indexOf` cannot miss for a vault of ours.
   function rekeyOperator(
     address fromAdmin,
     address toAdmin,
@@ -216,6 +219,10 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     emit VaultRekeyed(msg.sender, fromAdmin, toAdmin, settlementAsset, corridorAsset);
   }
 
+  /// @dev Position of `vault` in `vaults`. The `NotAuthorized` revert is unreachable from any
+  ///      vault this factory deployed (see `rekeyOperator`) and is kept on purpose: it is what
+  ///      stops a future caller, or a vault re-indexed under a different key, from shifting
+  ///      someone else's vault out of the list.
   function _indexOf(address[] storage vaults, address vault) private view returns (uint256) {
     uint256 length = vaults.length;
     for (uint256 i = 0; i < length; ++i) {
