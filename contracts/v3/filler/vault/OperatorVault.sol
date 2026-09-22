@@ -453,9 +453,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
       epoch.units -= units;
       bool inCorridor = epoch.inCorridor;
       _refundPending(inCorridor, receiver, units);
-      // Lifted out of the emit: SlithIR cannot lower a ternary in an event arg.
-      uint256 refundSettlement = inCorridor ? 0 : units;
-      uint256 refundCorridor = inCorridor ? units : 0;
+      // if/else rather than two ternaries: SlithIR cannot lower a ternary here,
+      // in an event arg or in the initialiser of a local declaration.
+      uint256 refundSettlement;
+      uint256 refundCorridor;
+      if (inCorridor) refundCorridor = units;
+      else refundSettlement = units;
       emit Claimed(controller, receiver, requestId, 0, refundSettlement, refundCorridor);
       return;
     }
