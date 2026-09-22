@@ -53,7 +53,8 @@ library VaultTypes {
     uint256 emergencyExitTimeout;
     uint256 valuationTimeout;
     uint256 managementFeeWad;
-    /// @dev Share of the gain above the basket mark, WAD. Zero = off.
+    /// @dev Share of NAV over the basket mark, the last-charged inventory revalued at the attested
+    ///      price. Capped at NAV over the all-time high when `perfFloorEnabled`. WAD; zero = off.
     uint256 performanceFeeWad;
     /// @dev Textile's cut of each fee leg, WAD. Held on the factory, not the vault.
     uint256 protocolManagementShareWad;
@@ -65,7 +66,7 @@ library VaultTypes {
     uint256 minRedeemShares;
     bool enableYield;
     uint256 minLiquidSettlement;
-    /// @dev Performance fee only above the vault's all-time-high price per share.
+    /// @dev Adds the all-time-high price per share as a second bar under the performance fee.
     bool perfFloorEnabled;
   }
 
