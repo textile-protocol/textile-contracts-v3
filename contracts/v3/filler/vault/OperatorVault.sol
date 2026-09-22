@@ -401,13 +401,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   /// @inheritdoc IOperatorVault
   /// @dev Pauses first if the guardian has not: an unpaused split could race a Permit2 pull.
+  ///      The span since the last checkpoint is the one the operator failed to attest, so
+  ///      its management fee is forfeited: the clock is reset before the pause can bank it.
   function settleRedeemEmergencyInKind(uint256 epochId) external override nonReentrant {
     Epoch storage epoch = _closedEpoch(epochId, false);
     _requireElapsed(epoch.closedAt, emergencyExitTimeout);
+    lastFeeCheckpoint = block.timestamp;
     if (!paused) _pause();
     uint256 stranded = VaultPolicy.tryRecallAllIdle(yieldAdapter, _owedAssets());
 
-    _checkpointFee(0, 0, 0);
     uint256 supply = totalSupply();
     uint256 freeS = _liquidSettlement();
     uint256 freeC = _freeCorridor();
@@ -525,14 +527,17 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
                                 ADMIN
   //////////////////////////////////////////////////////////////*/
 
-  function pause() external onlyGuardian {
+  /// @dev Guarded like `setFeeRecipient`: it mints via `_checkpointFee`.
+  function pause() external onlyGuardian nonReentrant {
     if (paused) revert VaultErrors.InvalidParams();
     _pause();
   }
 
+  /// @dev The fee clock restarts here: the paused span is not charged.
   function unpause() external onlyGuardian {
     if (!paused) revert VaultErrors.InvalidParams();
     paused = false;
+    lastFeeCheckpoint = block.timestamp;
     emit Unpaused(msg.sender);
   }
 
@@ -803,8 +808,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   }
 
   /// @dev Prices the given inventory; a zero `priceWad` (the unpriced paths) skips the performance leg.
+  ///      The management leg is earned for time the vault is open: paused, no time is charged.
+  ///      `_pause` banks what accrued before the pause and `unpause` restarts the clock.
   function _checkpointFee(uint256 freeS, uint256 freeC, uint256 priceWad) private {
-    uint256 elapsed = block.timestamp - lastFeeCheckpoint;
+    uint256 elapsed = paused ? 0 : block.timestamp - lastFeeCheckpoint;
     lastFeeCheckpoint = block.timestamp;
     uint256 mark = highWaterMarkWad;
     (uint256 operatorShares, uint256 protocolShares, address protocolRecipient, uint256 newMark) =
@@ -840,8 +847,12 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     if (!_durationElapsed(since, timeout)) revert VaultErrors.TimeoutNotReached();
   }
 
-  /// @dev Kills ERC-1271 and every outstanding order.
+  /// @dev Kills ERC-1271 and every outstanding order. Banks the management fee earned up to
+  ///      here, since nothing accrues while paused. Must never revert: the checkpoint's only
+  ///      external read is `protocolFeeFor` on the factory, which is immutable and ownerless,
+  ///      and the unpriced path mints to two recipients neither of which can be zero.
   function _pause() private {
+    _checkpointFee(0, 0, 0);
     paused = true;
     _bumpTradingEpoch();
     emit Paused(msg.sender);

@@ -24,7 +24,7 @@ import {
 import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 describe('OperatorVault — management fee', function () {
-  it('checkpoints the fee before a paused full-supply settle', async function () {
+  it('banks the fee at the pause and charges nothing more at a paused settle', async function () {
     const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n })
     await seedShares(ctx, ctx.lp1)
 
@@ -32,12 +32,15 @@ describe('OperatorVault — management fee', function () {
     const redeemId = await ctx.vault.currentRedeemEpochId()
     await closeRedeem(ctx, redeemId)
     await ctx.vault.connect(ctx.guardian).pause()
+    const banked = await ctx.vault.balanceOf(ctx.feeRecipient.address)
+    expect(banked).to.be.gt(0)
+
     await time.increase(365 * DAY)
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_1)
     const sigs = await attestationSignatures(ctx, att)
     await ctx.vault.settleRedeemEpoch(redeemId, att, ...sigs)
 
-    expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.be.gt(0)
+    expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(banked)
   })
 
   it('checkpoints accrued fees to the old recipient before a change', async function () {
@@ -54,6 +57,86 @@ describe('OperatorVault — management fee', function () {
     await seedShares(ctx, ctx.lp1)
     expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(0)
     expect(await ctx.vault.balanceOf(ctx.protocolFeeRecipient.address)).to.equal(0)
+  })
+
+  // The fee is earned for time the vault is open for business. A pause stops
+  // the clock, and the emergency exit, which only runs once the operator has
+  // missed the epoch, does not pay the operator for the time it missed.
+  describe('accrues only while the vault is open for business', function () {
+    it('charges nothing for the time the vault spends paused', async function () {
+      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n })
+      await seedShares(ctx, ctx.lp1)
+      await ctx.vault.connect(ctx.guardian).pause()
+      const supply = await ctx.vault.totalSupply()
+
+      // A year on pause, and a checkpoint in the middle of it: nothing is minted.
+      await time.increase(365 * DAY)
+      await ctx.vault.connect(ctx.operatorAdmin).setFeeRecipient(ctx.feeRecipient.address)
+      expect(await ctx.vault.totalSupply()).to.equal(supply)
+
+      // Accrual restarts at the unpause, so a year later a checkpoint charges one year, not two.
+      await ctx.vault.connect(ctx.guardian).unpause()
+      const unpausedAt = BigInt(await time.latest())
+      await time.increase(365 * DAY)
+      await ctx.vault.connect(ctx.operatorAdmin).setFeeRecipient(ctx.feeRecipient.address)
+      const oneYear = math.feeShares(
+        supply,
+        WAD / 10n,
+        (await ctx.vault.lastFeeCheckpoint()) - unpausedAt
+      )
+      expect(oneYear).to.be.gt(0)
+      expect((await ctx.vault.totalSupply()) - supply).to.equal(oneYear)
+    })
+
+    it('forfeits the period the emergency exit covers', async function () {
+      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n })
+      await seedShares(ctx, ctx.lp1)
+      const supply = await ctx.vault.totalSupply()
+      await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(500n), ctx.lp1.address, ctx.lp1.address)
+      const redeemId = await closeRedeem(ctx)
+      await time.increase(await ctx.vault.emergencyExitTimeout())
+
+      // The operator never attested this epoch. The redeemers are paid from an
+      // undiluted supply, and nobody is paid for the time since the last checkpoint.
+      const tx = ctx.vault.connect(ctx.lp2).settleRedeemEmergencyInKind(redeemId)
+      await expect(tx)
+        .to.emit(ctx.vault, 'RedeemEpochSettled')
+        .withArgs(redeemId, usdt(500n), usdt(500n), 0n)
+      await expect(tx).to.not.emit(ctx.vault, 'FeeAccrued')
+      expect(await ctx.vault.totalSupply()).to.equal(supply - usdt(500n))
+    })
+
+    it('banks what accrued before a guardian pause', async function () {
+      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n })
+      await seedShares(ctx, ctx.lp1)
+      const supply = await ctx.vault.totalSupply()
+      const t0 = await ctx.vault.lastFeeCheckpoint()
+      await time.increase(365 * DAY)
+
+      const positive = (n: bigint) => n > 0n
+      await expect(ctx.vault.connect(ctx.guardian).pause())
+        .to.emit(ctx.vault, 'FeeAccrued')
+        .withArgs(ctx.feeRecipient.address, positive, positive)
+      const whole = math.feeShares(supply, WAD / 10n, (await ctx.vault.lastFeeCheckpoint()) - t0)
+      expect((await ctx.vault.totalSupply()) - supply).to.equal(whole)
+    })
+
+    it('keeps what a guardian pause banked when the emergency exit follows', async function () {
+      const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n })
+      await seedShares(ctx, ctx.lp1)
+      await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(500n), ctx.lp1.address, ctx.lp1.address)
+      const redeemId = await closeRedeem(ctx)
+      await ctx.vault.connect(ctx.guardian).pause()
+      const supply = await ctx.vault.totalSupply()
+      const banked = await ctx.vault.balanceOf(ctx.feeRecipient.address)
+      expect(banked).to.be.gt(0)
+
+      // Only the span since the pause is forfeited, and nothing accrued in it anyway.
+      await time.increase(await ctx.vault.emergencyExitTimeout())
+      await expect(ctx.vault.settleRedeemEmergencyInKind(redeemId)).to.not.emit(ctx.vault, 'FeeAccrued')
+      expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.equal(banked)
+      expect(await ctx.vault.totalSupply()).to.equal(supply - usdt(500n))
+    })
   })
 
   describe('protocol cut', function () {
@@ -203,10 +286,12 @@ describe('OperatorVault — management fee', function () {
     it('settles and claims as the last holder, with the default cut on', async function () {
       const ctx = await deployOperatorVault({ managementFeeWad: WAD / 100n })
       await seedShares(ctx, ctx.lp1)
+      // A year's fee, banked by the pause. The paused settles below mint nothing more.
+      await time.increase(365 * DAY)
       await ctx.vault.connect(ctx.guardian).pause()
 
       // Everyone ahead of the protocol recipient leaves: the LP, then the
-      // operator's recipient. Each settle mints a fresh tail to both recipients.
+      // operator's recipient.
       await exitAll(ctx, [ctx.lp1, ctx.feeRecipient])
 
       const proto = ctx.protocolFeeRecipient
@@ -270,10 +355,10 @@ describe('OperatorVault — management fee', function () {
       return ctx.vault.freeSettlement()
     }
 
-    // Exact only because the settle-time checkpoint rounds to zero at this
-    // size, so the queued shares really are the whole supply. The totalSupply
-    // assertion pins that premise — see the convergence test below for what
-    // happens when the checkpoint does mint.
+    // Exact because a paused exit epoch accrues nothing, so the queued shares
+    // really are the whole supply. The totalSupply assertion pins that premise;
+    // the one-pass test below does the same at a size where an unpaused
+    // checkpoint would mint.
     it('is paid every asset behind it once the guardian pauses', async function () {
       const ctx = await windDown()
       const fee = ctx.feeRecipient
@@ -288,13 +373,13 @@ describe('OperatorVault — management fee', function () {
     })
 
     /**
-     * Big enough that the settle-time checkpoint mints, so the queued shares
-     * are no longer the whole supply and the exit pays pro rata. What is left
-     * is the fee earned during the exit epoch itself — a new below-floor tail,
-     * redeemable as a whole balance like any other. So the exit converges instead of
-     * completing in one pass, and nothing ever locks.
+     * Big enough that an unpaused settle-time checkpoint mints. That used to
+     * leave a fresh below-floor tail after every exit pass, so the wind-down
+     * converged rather than completed. A paused epoch accrues nothing, so the
+     * exit takes one pass: the pause banks what little accrued since the LP's
+     * settle, and the settle pays the whole supply out.
      */
-    it('converges when the exit epoch accrues a new tail', async function () {
+    it('completes in one pass, since a paused exit epoch accrues no new tail', async function () {
       const ctx = await deployOperatorVault({
         managementFeeWad: WAD / 10n,
         minRedeemShares: usdt(200_000n),
@@ -313,16 +398,13 @@ describe('OperatorVault — management fee', function () {
       expect(await ctx.vault.balanceOf(ctx.feeRecipient.address)).to.be.lt(
         await ctx.vault.minRedeemShares()
       )
+      const before = await ctx.settlement.balanceOf(ctx.feeRecipient.address)
 
       await ctx.vault.connect(ctx.guardian).pause()
-      const afterFirst = await exitFee(ctx)
-      const afterSecond = await exitFee(ctx)
+      expect(await exitFee(ctx)).to.equal(0)
 
-      // One pass is not the end, but it is almost all of it.
-      expect(afterFirst).to.be.gt(0)
-      expect(afterFirst).to.be.lt(stranded / 1_000n)
-      // And each further pass takes the same bite out of what is left.
-      expect(afterSecond).to.be.lt(afterFirst / 100n)
+      expect((await ctx.settlement.balanceOf(ctx.feeRecipient.address)) - before).to.equal(stranded)
+      expect(await ctx.vault.totalSupply()).to.equal(0)
     })
 
     // The settle-time checkpoint rounds to zero on a position this small, so
