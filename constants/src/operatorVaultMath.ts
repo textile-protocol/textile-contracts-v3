@@ -184,10 +184,10 @@ export function markAfter(
 
 /**
  * Mirrors OperatorVaultFactory.VERSION: the VaultInit layout the admin form and
- * deploy script encode, and the vault ABI the keeper drives. 3 settles only
- * against a dual-signed attestation; 4 charges the performance fee on the basket mark.
+ * deploy script encode, and the vault ABI the keeper drives. Bump both together
+ * whenever either changes.
  */
-export const OPERATOR_VAULT_FACTORY_VERSION = 4
+export const OPERATOR_VAULT_FACTORY_VERSION = 1
 
 export function tradingNonce(epoch: bigint, counter: bigint): bigint {
   return (epoch << EPOCH_NONCE_SHIFT) | counter

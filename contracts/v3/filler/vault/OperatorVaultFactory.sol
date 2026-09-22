@@ -17,7 +17,7 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
  *         authority over deployed vaults.
  */
 contract OperatorVaultFactory is IOperatorVaultFactory {
-  uint256 public constant VERSION = 4;
+  uint256 public constant VERSION = 1;
   uint256 public constant MAX_NAME_BYTES = 64;
   uint256 public constant MAX_SYMBOL_BYTES = 16;
   /// @notice The protocol may take at most half of either fee leg.

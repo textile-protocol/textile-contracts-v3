@@ -53,7 +53,7 @@ describe('OperatorVault — constructor and views', function () {
     expect(recipient).to.equal(ctx.protocolFeeRecipient.address)
     expect(managementShare).to.equal(PROTOCOL_FEE_SHARE_WAD)
     expect(performanceShare).to.equal(PROTOCOL_FEE_SHARE_WAD)
-    expect(await ctx.factory.VERSION()).to.equal(4)
+    expect(await ctx.factory.VERSION()).to.equal(1)
   })
 
   it('rejects tokens with missing or zero decimals', async function () {
