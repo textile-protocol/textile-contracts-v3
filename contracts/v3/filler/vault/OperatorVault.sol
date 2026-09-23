@@ -486,13 +486,21 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
       settlementOut = VaultLib.proRataWithResidue(units, remaining, epoch.remainingSettlement);
       corridorOut = VaultLib.proRataWithResidue(units, remaining, epoch.remainingCorridor);
       uint256 yieldWeight = VaultLib.proRataWithResidue(units, remaining, epoch.remainingYield);
-      reservedSettlement -= settlementOut;
-      reservedCorridor -= corridorOut;
       epoch.remainingSettlement -= settlementOut;
       epoch.remainingCorridor -= corridorOut;
       epoch.remainingYield -= yieldWeight;
-      if (settlementOut > 0) settlementAsset.safeTransfer(receiver, settlementOut);
-      if (corridorOut > 0) corridorAsset.safeTransfer(receiver, corridorOut);
+      // Release each reserve right before its own asset moves. A token that calls
+      // the receiver back on transfer must never see one leg's reserve given up
+      // while that leg's tokens are still here, or `_freeCorridor` over-reports
+      // inside the callback and a fill can spend corridor owed to another redeemer.
+      if (settlementOut > 0) {
+        reservedSettlement -= settlementOut;
+        settlementAsset.safeTransfer(receiver, settlementOut);
+      }
+      if (corridorOut > 0) {
+        reservedCorridor -= corridorOut;
+        corridorAsset.safeTransfer(receiver, corridorOut);
+      }
       if (yieldWeight > 0) _payYield(controller, receiver, requestId, yieldWeight);
     }
 
@@ -527,6 +535,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   /// @dev Reads the adapter via `_freeSettlement()`, so a reverting Aave view fails every fill.
   function isValidSignature(bytes32 hash, bytes calldata signature) external view override returns (bytes4) {
     if (paused) return VaultLib.ERC1271_FAIL;
+    // A view can't take `nonReentrant`, but it can refuse. While a guarded entry
+    // point is on the stack the inventory reads below may be mid-update (e.g. a
+    // token callback during `claim`), so no fill is authorised from in there.
+    if (_reentrancyGuardEntered()) return VaultLib.ERC1271_FAIL;
     return VaultPolicy.validateEnvelope(hash, signature, address(this));
   }
 
