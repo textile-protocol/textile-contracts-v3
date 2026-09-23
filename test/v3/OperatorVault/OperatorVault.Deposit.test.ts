@@ -135,7 +135,9 @@ describe('OperatorVault — deposits', function () {
   })
 
   it('rejects a stale attestation after another epoch changes lastSettledNav', async function () {
-    const ctx = await deployOperatorVault()
+    // The first epoch is processed a day after it closed; give it a valuation
+    // window that covers that, so the only thing rejected is the replay.
+    const ctx = await deployOperatorVault({ valuationTimeout: 3 * DAY })
     await ctx.vault.connect(ctx.lp1).requestDeposit(usdt(100n), ctx.lp1.address, ctx.lp1.address)
     const first = await ctx.vault.currentDepositEpochId()
     await time.increase(DAY)

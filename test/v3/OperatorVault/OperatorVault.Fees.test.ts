@@ -26,7 +26,9 @@ import { freshAttestation, attestationSignatures } from './helpers/vaultSignatur
 
 describe('OperatorVault — management fee', function () {
   it('banks the fee at the pause and charges nothing more at a paused settle', async function () {
-    const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n })
+    // Settling a year after close needs an emergency window that long: an
+    // attestation can't be used once the epoch could only exit in kind.
+    const ctx = await deployOperatorVault({ managementFeeWad: WAD / 10n, emergencyExitTimeout: 400 * DAY })
     await seedShares(ctx, ctx.lp1)
 
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)

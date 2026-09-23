@@ -21,6 +21,30 @@ import { VaultErrors } from "./VaultErrors.sol";
 import { VaultLib } from "./VaultLib.sol";
 import { VaultTypes } from "./VaultTypes.sol";
 
+/// @dev The vault's own public getters `verifyAttestation` reads to bound an attestation's
+///      lifetime. Declared here rather than on `IOperatorVault` so no caller changes.
+interface IVaultEpochClock {
+  function epochs(uint256 epochId)
+    external
+    view
+    returns (
+      uint8 state,
+      bool isDeposit,
+      uint64 openedAt,
+      uint64 cutoff,
+      uint64 closedAt,
+      bool inCorridor,
+      uint256 units,
+      uint256 shares,
+      uint256 remainingUnits,
+      uint256 remainingSettlement,
+      uint256 remainingCorridor,
+      uint256 remainingYield
+    );
+  function valuationTimeout() external view returns (uint256);
+  function emergencyExitTimeout() external view returns (uint256);
+}
+
 /// @notice Linked library holding the vault logic that does not fit under the 24kb cap:
 ///         order policy, config checks, fee accrual, admin lifecycle, sweeps, adapter plumbing.
 ///         Non-view functions run as delegatecalls, so the adapter always sees the vault as caller.
@@ -579,6 +603,7 @@ library VaultPolicy {
       revert VaultErrors.InvalidAttestation();
     }
     if (block.timestamp < att.validAfter || block.timestamp > att.validUntil) revert VaultErrors.InvalidAttestation();
+    _requireWithinEpochDeadline(epochId, vault);
     if (att.corridorAssetPrice == 0) revert VaultErrors.InvalidAttestation();
     bytes32 digest = VaultLib.attestationDigest(att, vault, block.chainid);
     IOperatorVault src = IOperatorVault(vault);
@@ -587,6 +612,21 @@ library VaultPolicy {
         || !VaultLib.isSigner(src.riskSigner(), digest, riskSignature)
     ) revert VaultErrors.InvalidAttestation();
     return att.corridorAssetPrice;
+  }
+
+  /// @dev A signed price can only settle an epoch while that epoch could still settle the
+  ///      normal way: until anyone may void a deposit epoch (`valuationTimeout` after close)
+  ///      or exit a redeem epoch in kind (`emergencyExitTimeout` after close). Without this
+  ///      the risk key can get a co-signature on a far-off `validUntil` and apply a stale
+  ///      price whenever it suits. Bounds the time of use, not `validUntil`, so an honest
+  ///      signer needs no knowledge of the deadline. The vault only verifies attestations
+  ///      for closed epochs; `closedAt == 0` is skipped so an open epoch is never affected.
+  function _requireWithinEpochDeadline(uint256 epochId, address vault) private view {
+    IVaultEpochClock clock = IVaultEpochClock(vault);
+    (, bool isDeposit,,, uint64 closedAt,,,,,,,) = clock.epochs(epochId);
+    if (closedAt == 0) return;
+    uint256 lifetime = isDeposit ? clock.valuationTimeout() : clock.emergencyExitTimeout();
+    if (block.timestamp > uint256(closedAt) + lifetime) revert VaultErrors.InvalidAttestation();
   }
 
   function _requireDecimals(address token) private view returns (uint8 d) {
