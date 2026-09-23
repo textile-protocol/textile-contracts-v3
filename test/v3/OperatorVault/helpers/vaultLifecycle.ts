@@ -10,7 +10,7 @@ import {
   type DeployedVault,
 } from '../fixtures/operatorVault.fixture'
 
-import { freshAttestation, attestationSignatures } from './vaultSignatures'
+import { attestedNav, freshAttestation, attestationSignatures } from './vaultSignatures'
 
 export async function closeDeposit(
   ctx: DeployedVault,
@@ -32,7 +32,7 @@ export async function processDeposit(
   const att = await freshAttestation(ctx.vault, epochId, price)
   const sigs = await attestationSignatures(ctx, att)
   await ctx.vault.processDepositEpoch(epochId, att, ...sigs)
-  return att.nav
+  return attestedNav(ctx.vault, att)
 }
 
 export async function closeAndProcessDeposit(

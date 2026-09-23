@@ -3,7 +3,10 @@
  *
  * Mirrors `VaultLib.attestationDigest` in
  * `packages/protocol/contracts/v3/filler/vault/libraries/VaultLib.sol` —
- * domain `OperatorVault` / `1`, verifying contract is the vault itself.
+ * domain `OperatorVault` / `2`, verifying contract is the vault itself.
+ * Vaults built before the struct dropped `nav` verify the ten-field struct
+ * under version `1`, and stay deployed, so both are kept here; the vault's
+ * `eip712Domain()` says which it runs (older vaults don't have it).
  * Parity is pinned by
  * `packages/protocol/test/v3/OperatorVault/AttestationDigest.parity.test.ts`;
  * keep the three in lockstep.
@@ -14,7 +17,10 @@
  */
 import { hashTypedData, type Address, type Hex } from 'viem'
 
-import type { NavAttestation } from './operatorVaultEnvelope'
+import {
+  isNavAttestationV1,
+  type NavAttestation,
+} from './operatorVaultEnvelope'
 
 export const NAV_ATTESTATION_TYPES = {
   NavAttestation: [
@@ -22,7 +28,6 @@ export const NAV_ATTESTATION_TYPES = {
     { name: 'chainId', type: 'uint256' },
     { name: 'epochId', type: 'uint256' },
     { name: 'corridorAssetPrice', type: 'uint256' },
-    { name: 'nav', type: 'uint256' },
     { name: 'lastSettledNav', type: 'uint256' },
     { name: 'freeSettlement', type: 'uint256' },
     { name: 'freeCorridor', type: 'uint256' },
@@ -31,10 +36,25 @@ export const NAV_ATTESTATION_TYPES = {
   ],
 } as const
 
-export function navAttestationDomain(vault: Address, chainId: bigint) {
+/** The older vaults' struct: `nav` after the price. */
+export const NAV_ATTESTATION_V1_TYPES = {
+  NavAttestation: [
+    ...NAV_ATTESTATION_TYPES.NavAttestation.slice(0, 4),
+    { name: 'nav', type: 'uint256' },
+    ...NAV_ATTESTATION_TYPES.NavAttestation.slice(4),
+  ],
+} as const
+
+export type NavAttestationVersion = '1' | '2'
+
+export function navAttestationDomain(
+  vault: Address,
+  chainId: bigint,
+  version: NavAttestationVersion = '2'
+) {
   return {
     name: 'OperatorVault',
-    version: '1',
+    version,
     chainId,
     verifyingContract: vault,
   } as const
@@ -42,10 +62,21 @@ export function navAttestationDomain(vault: Address, chainId: bigint) {
 
 /** The digest both vault signers sign for `processDepositEpoch` et al. */
 export function navAttestationDigest(attestation: NavAttestation): Hex {
-  return hashTypedData({
-    domain: navAttestationDomain(attestation.vault, attestation.chainId),
-    types: NAV_ATTESTATION_TYPES,
-    primaryType: 'NavAttestation',
-    message: attestation,
-  })
+  return isNavAttestationV1(attestation)
+    ? hashTypedData({
+        domain: navAttestationDomain(
+          attestation.vault,
+          attestation.chainId,
+          '1'
+        ),
+        types: NAV_ATTESTATION_V1_TYPES,
+        primaryType: 'NavAttestation',
+        message: attestation,
+      })
+    : hashTypedData({
+        domain: navAttestationDomain(attestation.vault, attestation.chainId),
+        types: NAV_ATTESTATION_TYPES,
+        primaryType: 'NavAttestation',
+        message: attestation,
+      })
 }

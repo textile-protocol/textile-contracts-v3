@@ -121,30 +121,26 @@ library VaultPolicy {
     uint256 freeSettlement;
     uint256 freeCorridor;
     uint256 priceWad;
-    uint256 markWad;
     uint256 managementFeeWad;
     uint256 performanceFeeWad;
   }
 
   /// @notice Both fee legs for one checkpoint, each split with the protocol on its own terms.
-  ///         Delegatecalled: writes the basket mark and logs it; the absolute mark is returned.
-  function checkpointAccrual(VaultTypes.BasketMark storage basket, Checkpoint memory c)
+  ///         Delegatecalled: writes both marks and logs them.
+  function checkpointAccrual(VaultTypes.Marks storage marks, Checkpoint memory c)
     external
-    returns (uint256 operatorShares, uint256 protocolShares, address protocolRecipient, uint256 newMarkWad)
+    returns (uint256 operatorShares, uint256 protocolShares, address protocolRecipient)
   {
     // Performance is charged net of the management leg.
     uint256 mgmt = VaultLib.feeShares(c.supply, c.managementFeeWad, c.elapsed);
     uint256 perf;
     if (c.supply == 0) {
       // Empty: both marks reset.
-      newMarkWad = VaultLib.WAD;
-      _storeMarks(basket, true, 0, 0, 0, c.markWad, newMarkWad);
-    } else if (c.priceWad == 0) {
-      newMarkWad = c.markWad;
-    } else {
-      (perf, newMarkWad) = _performanceLeg(basket, c, c.supply + mgmt);
+      _storeMarks(marks, true, 0, 0, 0, VaultLib.WAD);
+    } else if (c.priceWad != 0) {
+      perf = _performanceLeg(marks, c, c.supply + mgmt);
     }
-    if (mgmt + perf == 0) return (0, 0, address(0), newMarkWad);
+    if (mgmt + perf == 0) return (0, 0, address(0));
     uint256 mgmtShareWad;
     uint256 perfShareWad;
     (protocolRecipient, mgmtShareWad, perfShareWad) = _factory().protocolFeeFor(address(this));
@@ -156,30 +152,32 @@ library VaultPolicy {
 
   /// @dev Charges NAV over the revalued basket, capped at NAV over the absolute mark when the
   ///      floor is on. `supply` is post-management.
-  function _performanceLeg(VaultTypes.BasketMark storage basket, Checkpoint memory c, uint256 supply)
+  function _performanceLeg(VaultTypes.Marks storage marks, Checkpoint memory c, uint256 supply)
     private
-    returns (uint256 perf, uint256 newMarkWad)
+    returns (uint256 perf)
   {
     // A fresh basket is the inventory itself, so the first priced checkpoint charges nothing.
-    bool fresh = basket.settlementWad == 0 && basket.corridorWad == 0;
+    bool fresh = marks.settlementWad == 0 && marks.corridorWad == 0;
     (uint256 basketS, uint256 basketC) = fresh
       ? (c.freeSettlement, c.freeCorridor)
-      : (VaultLib.perShareTotal(basket.settlementWad, supply), VaultLib.perShareTotal(basket.corridorWad, supply));
+      : (VaultLib.perShareTotal(marks.settlementWad, supply), VaultLib.perShareTotal(marks.corridorWad, supply));
     (uint8 sDec, uint8 cDec) = _decimals(c.freeCorridor != 0 || basketC != 0);
     uint256 navNow = VaultLib.nav(c.freeSettlement, c.freeCorridor, c.priceWad, sDec, cDec);
     uint256 basketValue = VaultLib.nav(basketS, basketC, c.priceWad, sDec, cDec);
-    uint256 floorValue = navNow > basketValue ? _floorValue(c.markWad, supply) : 0;
+    uint256 markWad = marks.highWaterWad;
+    uint256 floorValue = navNow > basketValue ? _floorValue(markWad, supply) : 0;
     uint256 gain = VaultLib.chargeableGain(navNow, basketValue, floorValue);
 
     perf = VaultLib.performanceFeeShares(navNow, supply, gain, c.performanceFeeWad);
     uint256 supplyAfter = supply + perf;
-    newMarkWad = VaultLib.markAfter(navNow, supplyAfter, c.markWad);
 
     // Charged in full, the basket becomes the inventory. Floored, the charged slice joins the
     // settlement leg and the rest stays owed. No mint, no move.
     if (floorValue > basketValue) basketS += gain;
     else (basketS, basketC) = (c.freeSettlement, c.freeCorridor);
-    _storeMarks(basket, fresh || perf != 0, basketS, basketC, supplyAfter, c.markWad, newMarkWad);
+    _storeMarks(
+      marks, fresh || perf != 0, basketS, basketC, supplyAfter, VaultLib.markAfter(navNow, supplyAfter, markWad)
+    );
   }
 
   /// @notice Fold a processed deposit into the basket leg it arrived in: the basket's value grows
@@ -188,8 +186,7 @@ library VaultPolicy {
   /// @param attestedS Settlement floor the checkpoint that just ran priced.
   /// @param attestedC Corridor floor the checkpoint that just ran priced.
   function absorbDeposit(
-    VaultTypes.BasketMark storage basket,
-    uint256 markWad,
+    VaultTypes.Marks storage marks,
     uint256 supply,
     uint256 shares,
     uint256 assets,
@@ -200,35 +197,37 @@ library VaultPolicy {
     // A fresh basket starts from the floors the checkpoint priced, not from live inventory:
     // surplus that arrived after the attestation was signed stays chargeable gain instead of
     // being folded in unpriced (audit F-05).
-    bool fresh = basket.settlementWad == 0 && basket.corridorWad == 0;
-    uint256 basketS = fresh ? attestedS : VaultLib.perShareTotal(basket.settlementWad, supply);
-    uint256 basketC = fresh ? attestedC : VaultLib.perShareTotal(basket.corridorWad, supply);
+    bool fresh = marks.settlementWad == 0 && marks.corridorWad == 0;
+    uint256 basketS = fresh ? attestedS : VaultLib.perShareTotal(marks.settlementWad, supply);
+    uint256 basketC = fresh ? attestedC : VaultLib.perShareTotal(marks.corridorWad, supply);
     if (inCorridor) basketC += assets;
     else basketS += assets;
-    _storeMarks(basket, true, basketS, basketC, supply + shares, markWad, markWad);
+    _storeMarks(marks, true, basketS, basketC, supply + shares, marks.highWaterWad);
   }
 
-  /// @dev Stores `units` of each leg per share over `supply` when `rebase`, and logs all three
-  ///      marks when any of them moved.
+  /// @dev Stores `units` of each leg per share over `supply` when `rebase`, sets the absolute
+  ///      mark, and logs all three marks when any of them moved.
   function _storeMarks(
-    VaultTypes.BasketMark storage basket,
+    VaultTypes.Marks storage marks,
     bool rebase,
     uint256 unitsS,
     uint256 unitsC,
     uint256 supply,
-    uint256 markWad,
     uint256 newMarkWad
   ) private {
-    (uint256 s, uint256 k) = (basket.settlementWad, basket.corridorWad);
-    bool moved;
+    (uint256 s, uint256 k) = (marks.settlementWad, marks.corridorWad);
+    bool moved = newMarkWad != marks.highWaterWad;
+    if (moved) marks.highWaterWad = newMarkWad;
     if (rebase) {
       (uint256 nextS, uint256 nextK) =
         (VaultLib.basketPerShare(unitsS, supply), VaultLib.basketPerShare(unitsC, supply));
-      moved = nextS != s || nextK != k;
-      if (moved) (basket.settlementWad, basket.corridorWad) = (nextS, nextK);
-      (s, k) = (nextS, nextK);
+      if (nextS != s || nextK != k) {
+        (marks.settlementWad, marks.corridorWad) = (nextS, nextK);
+        (s, k) = (nextS, nextK);
+        moved = true;
+      }
     }
-    if (moved || newMarkWad != markWad) emit IOperatorVault.MarkUpdated(newMarkWad, s, k);
+    if (moved) emit IOperatorVault.MarkUpdated(newMarkWad, s, k);
   }
 
   /// @dev Vault immutables, read back rather than passed (33 vault bytes per read site) and only

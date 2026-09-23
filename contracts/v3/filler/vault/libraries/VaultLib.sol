@@ -34,20 +34,24 @@ library VaultLib {
     keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
   bytes32 internal constant PERMIT2_NAME_HASH = keccak256("Permit2");
 
+  /// @dev No `nav`: the vault derives it from the floors and the price. Vaults built before
+  ///      that verify the ten-field struct under domain version "1"; this one is "2", and
+  ///      `eip712Domain()` is how a signer tells them apart.
   bytes32 internal constant ATTESTATION_TYPEHASH = keccak256(
-    "NavAttestation(address vault,uint256 chainId,uint256 epochId,uint256 corridorAssetPrice,uint256 nav,uint256 lastSettledNav,uint256 freeSettlement,uint256 freeCorridor,uint256 validAfter,uint256 validUntil)"
+    "NavAttestation(address vault,uint256 chainId,uint256 epochId,uint256 corridorAssetPrice,uint256 lastSettledNav,uint256 freeSettlement,uint256 freeCorridor,uint256 validAfter,uint256 validUntil)"
   );
   bytes32 internal constant ATTESTATION_DOMAIN_TYPEHASH =
     keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-  bytes32 internal constant ATTESTATION_NAME_HASH = keccak256("OperatorVault");
-  bytes32 internal constant ATTESTATION_VERSION_HASH = keccak256("1");
+  string internal constant ATTESTATION_NAME = "OperatorVault";
+  string internal constant ATTESTATION_VERSION = "2";
+  bytes32 internal constant ATTESTATION_NAME_HASH = keccak256(bytes(ATTESTATION_NAME));
+  bytes32 internal constant ATTESTATION_VERSION_HASH = keccak256(bytes(ATTESTATION_VERSION));
 
   struct NavAttestation {
     address vault;
     uint256 chainId;
     uint256 epochId;
     uint256 corridorAssetPrice;
-    uint256 nav;
     uint256 lastSettledNav;
     uint256 freeSettlement;
     uint256 freeCorridor;
@@ -204,7 +208,6 @@ library VaultLib {
         att.chainId,
         att.epochId,
         att.corridorAssetPrice,
-        att.nav,
         att.lastSettledNav,
         att.freeSettlement,
         att.freeCorridor,

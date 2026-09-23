@@ -6,6 +6,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import { IERC5267 } from "@openzeppelin/contracts/interfaces/IERC5267.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IOperatorVault } from "./interfaces/IOperatorVault.sol";
@@ -24,7 +25,7 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
  *         pay both assets pro rata. One closed redeem epoch at a time puts the vault in
  *         close-only mode; pause is an independent flag on top.
  */
-contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, VaultErrors {
+contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IERC5267, IOperatorVault, VaultErrors {
   using SafeERC20 for IERC20;
 
   /// @dev `claim` treats `Processed` and everything after it as claimable.
@@ -103,10 +104,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   uint256 public currentRedeemEpochId;
   uint256 public closedRedeemEpochId;
   uint256 public lastFeeCheckpoint;
-  /// @notice Performance-fee absolute mark, WAD assets per share. Only ever rises.
-  uint256 public highWaterMarkWad;
-  /// @notice Per-share inventory the performance fee was last charged against.
-  VaultTypes.BasketMark public basketMark;
+  /// @dev Read through `highWaterMarkWad` and `basketMark`, the getters older vaults expose.
+  VaultTypes.Marks private _marks;
   uint256 public lastSettledNav;
   uint256 public lastRedeemSettledAt;
   uint256 public pendingSettlement;
@@ -289,6 +288,9 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
     // NAV before the checkpoint, supply after: this epoch converts at the post-fee price.
     (uint256 price,,) = _verifiedLiveNav(epochId, attestation, strategySignature, riskSignature);
+    uint256 attestedNav = VaultLib.nav(
+      attestation.freeSettlement, attestation.freeCorridor, price, settlementDecimals, corridorDecimals
+    );
     _checkpointFee(attestation.freeSettlement, attestation.freeCorridor, price);
 
     uint256 supply = totalSupply();
@@ -297,17 +299,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     uint256 value =
       inCorridor ? VaultLib.nav(0, assets, price, settlementDecimals, corridorDecimals) : assets;
     // With no supply the epoch mints at its own value; any surplus already here becomes NAV
-    // its depositors share. Converting against the signed NAV instead let a bare transfer
+    // its depositors share. Converting against the attested NAV instead let a bare transfer
     // between close and process shrink the epoch to one share (audit H-02).
-    uint256 shares =
-      VaultLib.convertToShares(value, supply, supply == 0 ? 0 : attestation.nav, Math.Rounding.Floor);
+    uint256 shares = VaultLib.convertToShares(value, supply, supply == 0 ? 0 : attestedNav, Math.Rounding.Floor);
     if (shares == 0) revert VaultErrors.ZeroAmount();
 
     _releasePending(inCorridor, assets);
     _mint(address(this), shares);
     VaultPolicy.absorbDeposit(
-      basketMark,
-      highWaterMarkWad,
+      _marks,
       supply,
       shares,
       assets,
@@ -680,6 +680,43 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     return _roles.feeRecipient;
   }
 
+  /// @notice ERC-5267: the domain NAV attestations are signed under. Its version is how a signer
+  ///         tells this vault's attestation struct from the one older vaults verify.
+  function eip712Domain()
+    external
+    view
+    override
+    returns (
+      bytes1 fields,
+      string memory name,
+      string memory version,
+      uint256 chainId,
+      address verifyingContract,
+      bytes32 salt,
+      uint256[] memory extensions
+    )
+  {
+    return (
+      hex"0f",
+      VaultLib.ATTESTATION_NAME,
+      VaultLib.ATTESTATION_VERSION,
+      block.chainid,
+      address(this),
+      bytes32(0),
+      new uint256[](0)
+    );
+  }
+
+  /// @notice Performance-fee absolute mark, WAD assets per share. Only ever rises.
+  function highWaterMarkWad() external view returns (uint256) {
+    return _marks.highWaterWad;
+  }
+
+  /// @notice Per-share inventory the performance fee was last charged against.
+  function basketMark() external view returns (uint256 settlementWad, uint256 corridorWad) {
+    return (_marks.settlementWad, _marks.corridorWad);
+  }
+
   /// @inheritdoc IOperatorVault
   function closeOnly() public view override returns (bool) {
     return closedRedeemEpochId != 0;
@@ -829,22 +866,18 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   function _checkpointFee(uint256 freeS, uint256 freeC, uint256 priceWad) private {
     uint256 elapsed = paused ? 0 : block.timestamp - lastFeeCheckpoint;
     lastFeeCheckpoint = block.timestamp;
-    uint256 mark = highWaterMarkWad;
-    (uint256 operatorShares, uint256 protocolShares, address protocolRecipient, uint256 newMark) =
-      VaultPolicy.checkpointAccrual(
-        basketMark,
-        VaultPolicy.Checkpoint({
-          supply: totalSupply(),
-          elapsed: elapsed,
-          freeSettlement: freeS,
-          freeCorridor: freeC,
-          priceWad: priceWad,
-          markWad: mark,
-          managementFeeWad: managementFeeWad,
-          performanceFeeWad: performanceFeeWad
-        })
-      );
-    if (newMark != mark) highWaterMarkWad = newMark;
+    (uint256 operatorShares, uint256 protocolShares, address protocolRecipient) = VaultPolicy.checkpointAccrual(
+      _marks,
+      VaultPolicy.Checkpoint({
+        supply: totalSupply(),
+        elapsed: elapsed,
+        freeSettlement: freeS,
+        freeCorridor: freeC,
+        priceWad: priceWad,
+        managementFeeWad: managementFeeWad,
+        performanceFeeWad: performanceFeeWad
+      })
+    );
     _accrueFee(_roles.feeRecipient, operatorShares, elapsed);
     _accrueFee(protocolRecipient, protocolShares, elapsed);
   }
@@ -948,9 +981,10 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
     return VaultLib.nav(_freeSettlement(), _freeCorridor(), priceWad, settlementDecimals, corridorDecimals);
   }
 
-  /// @dev Binds the attestation to `lastSettledNav` (no replay) and to its own floors (no NAV the
-  ///      floors do not back), then requires live balances at or above those floors. Surplus is
-  ///      allowed so it cannot grief settlement; `_recordSettledNav` marks it in afterwards.
+  /// @dev Binds the attestation to `lastSettledNav` (no replay), then requires live balances at or
+  ///      above its floors. The NAV it stands for is the floors at its price, so no NAV the floors
+  ///      do not back can be signed. Surplus is allowed so it cannot grief settlement;
+  ///      `_recordSettledNav` marks it in afterwards.
   function _verifiedLiveNav(
     uint256 epochId,
     VaultLib.NavAttestation calldata att,
@@ -959,9 +993,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   ) private view returns (uint256 priceWad, uint256 freeS, uint256 freeC) {
     priceWad = VaultPolicy.verifyAttestation(att, strategySignature, riskSignature, epochId, address(this));
     if (att.lastSettledNav != lastSettledNav) revert VaultErrors.InvalidAttestation();
-    if (
-      att.nav != VaultLib.nav(att.freeSettlement, att.freeCorridor, priceWad, settlementDecimals, corridorDecimals)
-    ) revert VaultErrors.InvalidAttestation();
     freeS = _freeSettlement();
     freeC = _freeCorridor();
     if (freeS < att.freeSettlement || freeC < att.freeCorridor) revert VaultErrors.InconsistentNav();

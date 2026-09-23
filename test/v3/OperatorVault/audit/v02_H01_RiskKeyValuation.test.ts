@@ -3,8 +3,8 @@
  *
  * The vault only checks an attestation from below: live NAV and live free
  * balances must be AT LEAST the signed figures. Nothing bounds them from
- * above, so a risk signer could sign `nav = 0`, `freeSettlement = 0`,
- * `freeCorridor = 0` for any epoch and the vault accepted it:
+ * above, so a risk signer could sign zero floors, and so a zero NAV, for any
+ * epoch and the vault accepted it:
  *
  *   (a) `processDepositEpoch` converted the epoch against a zero NAV, so a
  *       minimum-size deposit minted `assets * (supply + 1)` shares and owned
@@ -31,7 +31,7 @@ const ATTACKER_DEPOSIT = usdt(100n) // the vault minimum
 /** The attestation the floors cannot reject, signed by the risk key alone. */
 async function riskOnlyZeroAttestation(ctx: DeployedVault, epochId: bigint) {
   const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-  const zeroed = { ...att, nav: 0n, freeSettlement: 0n, freeCorridor: 0n }
+  const zeroed = { ...att, freeSettlement: 0n, freeCorridor: 0n }
   const riskSig = await signAttestation(ctx.harness, ctx.risk, zeroed)
   return { att: zeroed, riskSig }
 }

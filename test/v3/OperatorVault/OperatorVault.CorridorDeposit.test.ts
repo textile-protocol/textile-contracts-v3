@@ -14,7 +14,7 @@ import {
   pullFromVault,
   seedShares,
 } from './helpers/vaultLifecycle'
-import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
+import { attestedNav, freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 /** 0.0006 USDT per cNGN, WAD-scaled. cngn(1_000_000) is worth usdt(600). */
 const PRICE_CNGN = 6n * 10n ** 14n
@@ -151,7 +151,7 @@ describe('OperatorVault — corridor deposits', function () {
     await time.increase(1)
     await ctx.vault.closeDepositEpoch(corridorId)
     const att = await freshAttestation(ctx.vault, corridorId, PRICE_CNGN)
-    expect(att.nav).to.equal(usdt(600n)) // pending corridor is not in NAV yet
+    expect(await attestedNav(ctx.vault, att)).to.equal(usdt(600n)) // pending corridor is not in NAV yet
     await ctx.vault.processDepositEpoch(
       corridorId,
       att,
@@ -206,7 +206,7 @@ describe('OperatorVault — corridor deposits', function () {
     await ctx.vault.connect(ctx.guardian).pause()
     const att = await freshAttestation(ctx.vault, redeemId, PRICE_CNGN)
     expect(att.freeCorridor).to.equal(0n)
-    expect(att.nav).to.equal(usdt(1_000n))
+    expect(await attestedNav(ctx.vault, att)).to.equal(usdt(1_000n))
     await expect(
       ctx.vault.settleRedeemEpoch(
         redeemId,
@@ -228,7 +228,7 @@ describe('OperatorVault — corridor deposits', function () {
     await expectCorridorBooksBalance(ctx)
     await ctx.vault.closeDepositEpoch(corridorId)
     const depositAtt = await freshAttestation(ctx.vault, corridorId, PRICE_CNGN)
-    expect(depositAtt.nav).to.equal(0n)
+    expect(await attestedNav(ctx.vault, depositAtt)).to.equal(0n)
     await ctx.vault.processDepositEpoch(
       corridorId,
       depositAtt,

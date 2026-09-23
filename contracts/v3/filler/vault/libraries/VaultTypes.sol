@@ -6,9 +6,12 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Constructor / factory payloads and shared storage structs for OperatorVault.
 library VaultTypes {
-  /// @notice Performance-fee basket mark: WAD-scaled atomic units of each asset per share. Full
-  ///         width, since a leg that saturated would understate the basket and re-charge it.
-  struct BasketMark {
+  /// @notice Performance-fee marks. `highWaterWad` is the absolute mark, WAD assets per share,
+  ///         and only ever rises. The basket legs are WAD-scaled atomic units of each asset per
+  ///         share, full width, since a leg that saturated would understate the basket and
+  ///         re-charge it.
+  struct Marks {
+    uint256 highWaterWad;
     uint256 settlementWad;
     uint256 corridorWad;
   }

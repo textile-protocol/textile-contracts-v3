@@ -60,18 +60,36 @@ const VAULT_ENVELOPE_PARAMS = [
   { type: 'bytes' },
 ] as const
 
-export interface NavAttestation {
+/**
+ * What a vault built after the attestation dropped `nav` verifies, under
+ * domain version "2". The vault derives the NAV from the floors and the price.
+ */
+export interface NavAttestationV2 {
   vault: Address
   chainId: bigint
   epochId: bigint
   corridorAssetPrice: bigint
-  nav: bigint
   lastSettledNav: bigint
   freeSettlement: bigint
   freeCorridor: bigint
   validAfter: bigint
   validUntil: bigint
 }
+
+/**
+ * What older vaults verify, under domain version "1": the same fields plus a
+ * signed `nav` the vault checks against the floors and the price.
+ */
+export interface NavAttestationV1 extends NavAttestationV2 {
+  nav: bigint
+}
+
+/** Either version. Which one is set by the vault, and `nav` tells them apart. */
+export type NavAttestation = NavAttestationV1 | NavAttestationV2
+
+export const isNavAttestationV1 = (
+  att: NavAttestation
+): att is NavAttestationV1 => 'nav' in att
 
 export interface VaultEnvelope {
   order: FillerLimitOrderFields

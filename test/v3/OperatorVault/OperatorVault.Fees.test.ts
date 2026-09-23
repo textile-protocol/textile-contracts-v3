@@ -593,8 +593,9 @@ describe('OperatorVault — performance fee', function () {
     await expect(settle()).to.not.emit(ctx.vault, 'MarkUpdated')
   })
 
-  it('refuses an attestation that charges on a NAV its floors would not pay', async function () {
-    // Two colluding keys could sign a full NAV for the fee leg with near-zero floors for redeemers.
+  it('charges the fee on the same floors it pays redeemers', async function () {
+    // There is no signed NAV to set apart from the floors: understating them to
+    // short redeemers understates the fee leg with them.
     const ctx = await seeded()
     await gain(ctx, usdt(100_000n))
     await ctx.vault.connect(ctx.lp1).requestRedeem(usdt(1n), ctx.lp1.address, ctx.lp1.address)
@@ -602,10 +603,7 @@ describe('OperatorVault — performance fee', function () {
     const att = await freshAttestation(ctx.vault, id, PRICE_1)
     att.freeSettlement = 0n
     const sigs = await attestationSignatures(ctx, att)
-    await expect(ctx.vault.settleRedeemEpoch(id, att, ...sigs)).to.be.revertedWithCustomError(
-      ctx.vault,
-      'InvalidAttestation'
-    )
+    await ctx.vault.settleRedeemEpoch(id, att, ...sigs)
     expect(await perfMinted(ctx)).to.equal(0)
   })
 

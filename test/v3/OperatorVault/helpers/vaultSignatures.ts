@@ -11,7 +11,6 @@ export interface Attestation {
   chainId: bigint
   epochId: bigint
   corridorAssetPrice: bigint
-  nav: bigint
   lastSettledNav: bigint
   freeSettlement: bigint
   freeCorridor: bigint
@@ -44,32 +43,37 @@ export async function freshAttestation(
   now?: number
 ): Promise<Attestation> {
   const t = BigInt(now ?? (await ethers.provider.getBlock('latest'))!.timestamp)
-  const [freeSettlement, freeCorridor, settlementDecimals, corridorDecimals, lastSettledNav] =
-    await Promise.all([
-      vault.freeSettlement(),
-      vault.freeCorridor(),
-      vault.settlementDecimals(),
-      vault.corridorDecimals(),
-      vault.lastSettledNav(),
-    ])
+  const [freeSettlement, freeCorridor, lastSettledNav] = await Promise.all([
+    vault.freeSettlement(),
+    vault.freeCorridor(),
+    vault.lastSettledNav(),
+  ])
   return {
     vault: await vault.getAddress(),
     chainId: (await ethers.provider.getNetwork()).chainId,
     epochId,
     corridorAssetPrice: price,
-    nav: nav(
-      freeSettlement,
-      freeCorridor,
-      price,
-      Number(settlementDecimals),
-      Number(corridorDecimals)
-    ),
     lastSettledNav,
     freeSettlement,
     freeCorridor,
     validAfter: t - 60n,
     validUntil: t + 3600n,
   }
+}
+
+/** The NAV the vault derives from an attestation: its floors at its price. */
+export async function attestedNav(vault: OperatorVault, att: Attestation): Promise<bigint> {
+  const [settlementDecimals, corridorDecimals] = await Promise.all([
+    vault.settlementDecimals(),
+    vault.corridorDecimals(),
+  ])
+  return nav(
+    att.freeSettlement,
+    att.freeCorridor,
+    att.corridorAssetPrice,
+    Number(settlementDecimals),
+    Number(corridorDecimals)
+  )
 }
 
 export function encodeValidationData(fillers: string[], exclusiveUntil: bigint): string {

@@ -136,7 +136,6 @@ describe('OperatorVault — recovery', function () {
       const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
       att.freeSettlement = 0n
       att.freeCorridor = 0n
-      att.nav = 0n
       const sigs = await attestationSignatures(ctx, att)
       await ctx.vault.settleRedeemEpoch(epochId, att, ...sigs)
 

@@ -4,7 +4,7 @@ import { expect } from 'chai'
 import { nav } from '../../../constants/src/operatorVaultMath'
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { closeAndProcessDeposit, closeRedeem, seedShares } from './helpers/vaultLifecycle'
-import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
+import { attestedNav, freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 async function seededVault() {
   const ctx = await deployOperatorVault()
@@ -246,7 +246,7 @@ describe('OperatorVault — redemptions', function () {
     // A quarter of the supply takes a quarter of each attested leg, priced by
     // nothing: the corridor price never enters the payout.
     const lp2Shares = await ctx.vault.balanceOf(ctx.lp2.address)
-    const lp2ValueBefore = (att.nav * lp2Shares) / supply
+    const lp2ValueBefore = ((await attestedNav(ctx.vault, att)) * lp2Shares) / supply
     const expectedS = (att.freeSettlement * shares) / supply
     const expectedC = (att.freeCorridor * shares) / supply
     await expect(ctx.vault.settleRedeemEpoch(epochId, att, ...sigs))

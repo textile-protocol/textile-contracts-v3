@@ -31,7 +31,6 @@ function attestation(overrides: Partial<Record<string, bigint | string>> = {}) {
     chainId: 42220n,
     epochId: 3n,
     corridorAssetPrice: 651_234_567_890_123_456n,
-    nav: 1_234_567_000_000n,
     lastSettledNav: 1_200_000_000_000n,
     freeSettlement: 900_000_000_000n,
     freeCorridor: 500_000_000_000_000_000_000_000n,
@@ -58,7 +57,6 @@ describe('NAV attestation digest parity (TS vs Solidity)', () => {
   it('matches at the uint256 extremes', async () => {
     const att = attestation({
       corridorAssetPrice: MAX_UINT256,
-      nav: MAX_UINT256,
       lastSettledNav: 0n,
       freeSettlement: MAX_UINT256,
       freeCorridor: 0n,
@@ -77,6 +75,15 @@ describe('NAV attestation digest parity (TS vs Solidity)', () => {
       navAttestationDigest({ ...att, vault: otherVault.vault })
     ).to.not.equal(base)
     expect(navAttestationDigest({ ...att, chainId: 8453n })).to.not.equal(base)
+  })
+
+  it('never signs a ten-field attestation into the nine-field digest', async () => {
+    // Older vaults verify `nav` under domain version "1". The same figures
+    // with a `nav` are the old struct, and must not hash to what this vault reads.
+    const att = attestation()
+    expect(navAttestationDigest({ ...att, nav: 1n })).to.not.equal(
+      await harness.attestationDigest(att, att.vault, att.chainId)
+    )
   })
 
   it('a signature over the TS digest recovers on-chain via isSigner', async () => {

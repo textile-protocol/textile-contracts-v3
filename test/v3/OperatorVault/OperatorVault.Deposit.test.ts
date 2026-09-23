@@ -4,7 +4,7 @@ import { ethers } from 'hardhat'
 
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
 import { closeAndProcessDeposit, pullFromVault } from './helpers/vaultLifecycle'
-import { freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
+import { attestedNav, freshAttestation, attestationSignatures } from './helpers/vaultSignatures'
 
 describe('OperatorVault — deposits', function () {
   async function processOpenDeposit() {
@@ -105,21 +105,16 @@ describe('OperatorVault — deposits', function () {
     await expect(ctx.vault.processDepositEpoch(epochId, bad, ...sigs)).to.be.reverted
   })
 
-  it('rejects an attestation whose NAV is not what its own floors are worth', async function () {
+  it('names the attestation domain, so a signer can tell this struct from the ten-field one', async function () {
     const ctx = await deployOperatorVault()
-    await ctx.vault.connect(ctx.lp1).requestDeposit(usdt(100n), ctx.lp1.address, ctx.lp1.address)
-    const epochId = await ctx.vault.currentDepositEpochId()
-    await time.increase(DAY)
-    await ctx.vault.closeDepositEpoch(epochId)
-    // The three signed numbers are one fact stated twice: a NAV the floors do
-    // not add up to is refused as malformed, whatever the live balances say.
-    const att = await freshAttestation(ctx.vault, epochId, PRICE_1)
-    att.nav = att.nav + 1n
-    const sigs = await attestationSignatures(ctx, att)
-    await expect(ctx.vault.processDepositEpoch(epochId, att, ...sigs)).to.be.revertedWithCustomError(
-      ctx.vault,
-      'InvalidAttestation'
-    )
+    const domain = await ctx.vault.eip712Domain()
+    expect(domain.fields).to.equal('0x0f')
+    expect(domain.name).to.equal('OperatorVault')
+    expect(domain.version).to.equal('2')
+    expect(domain.chainId).to.equal((await ethers.provider.getNetwork()).chainId)
+    expect(domain.verifyingContract).to.equal(await ctx.vault.getAddress())
+    expect(domain.salt).to.equal(ethers.ZeroHash)
+    expect(domain.extensions).to.deep.equal([])
   })
 
   it('still processes after a surplus donation that lifts live NAV', async function () {
@@ -181,7 +176,7 @@ describe('OperatorVault — deposits', function () {
     await time.increase(DAY)
     await ctx.vault.closeDepositEpoch(second)
     const att = await freshAttestation(ctx.vault, second, PRICE_1)
-    expect(att.nav).to.equal(usdt(1_000n))
+    expect(await attestedNav(ctx.vault, att)).to.equal(usdt(1_000n))
     await ctx.settlement.mint(await ctx.vault.getAddress(), usdt(1_000n))
     await ctx.vault.processDepositEpoch(second, att, ...(await attestationSignatures(ctx, att)))
     const epoch = await ctx.vault.epochs(second)
