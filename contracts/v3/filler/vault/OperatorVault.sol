@@ -326,8 +326,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
 
   /// @inheritdoc IOperatorVault
   /// @dev No key, no pause check, works while wedged: with `settleRedeemEmergencyInKind`
-  ///      this is why an abandoned vault is never a permanent lock. Races
-  ///      `processDepositEpoch` once `valuationTimeout` elapses; either outcome is lossless.
+  ///      this is why an abandoned vault is never a permanent lock. Attestations stop
+  ///      verifying at `valuationTimeout` too, so this and `processDepositEpoch` share one second.
   function voidDepositEpoch(uint256 epochId) external override {
     Epoch storage epoch = _closedEpoch(epochId, true);
     _requireElapsed(epoch.closedAt, valuationTimeout);
@@ -489,10 +489,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
       epoch.remainingSettlement -= settlementOut;
       epoch.remainingCorridor -= corridorOut;
       epoch.remainingYield -= yieldWeight;
-      // Release each reserve right before its own asset moves. A token that calls
-      // the receiver back on transfer must never see one leg's reserve given up
-      // while that leg's tokens are still here, or `_freeCorridor` over-reports
-      // inside the callback and a fill can spend corridor owed to another redeemer.
+      // Each reserve is released right before its own transfer, so a transfer callback
+      // never sees a leg unreserved while its tokens are still here.
       if (settlementOut > 0) {
         reservedSettlement -= settlementOut;
         settlementAsset.safeTransfer(receiver, settlementOut);
@@ -535,9 +533,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IOperatorVault, Vaul
   /// @dev Reads the adapter via `_freeSettlement()`, so a reverting Aave view fails every fill.
   function isValidSignature(bytes32 hash, bytes calldata signature) external view override returns (bytes4) {
     if (paused) return VaultLib.ERC1271_FAIL;
-    // A view can't take `nonReentrant`, but it can refuse. While a guarded entry
-    // point is on the stack the inventory reads below may be mid-update (e.g. a
-    // token callback during `claim`), so no fill is authorised from in there.
+    // A view can't take `nonReentrant`, but it can refuse: mid-call (e.g. a token
+    // callback in `claim`) the inventory reads below may be half-updated.
     if (_reentrancyGuardEntered()) return VaultLib.ERC1271_FAIL;
     return VaultPolicy.validateEnvelope(hash, signature, address(this));
   }

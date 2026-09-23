@@ -92,6 +92,7 @@ interface IOperatorVault {
   /// @notice Settle a closed redeem epoch against a dual-signed attestation. Redeemers are paid
   ///         both assets pro rata to their share of supply, off the attested free balances.
   ///         Settling while paused pays live balances instead, and a full-supply exit requires the pause.
+  ///         No attestation verifies once `emergencyExitTimeout` has passed since close.
   function settleRedeemEpoch(
     uint256 epochId,
     VaultLib.NavAttestation calldata attestation,

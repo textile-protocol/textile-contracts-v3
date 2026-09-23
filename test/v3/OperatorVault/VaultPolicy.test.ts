@@ -5,6 +5,7 @@ import { ethers } from 'hardhat'
 import * as math from '../../../constants/src/operatorVaultMath'
 
 import { DAY, PRICE_1, deployOperatorVault, usdt } from './fixtures/operatorVault.fixture'
+import { closeDeposit } from './helpers/vaultLifecycle'
 import {
   attestationSignatures,
   encodeValidationData,
@@ -48,9 +49,17 @@ async function validConfig(ctx: Awaited<ReturnType<typeof deployOperatorVault>>)
   }
 }
 
+/** A vault whose epoch 1 is closed, so `verifyAttestation` has a deadline to check against. */
+async function deployWithClosedEpoch() {
+  const ctx = await deployOperatorVault()
+  await ctx.vault.connect(ctx.lp1).requestDeposit(usdt(1_000n), ctx.lp1.address, ctx.lp1.address)
+  await closeDeposit(ctx)
+  return ctx
+}
+
 describe('VaultPolicy', function () {
   it('rejects a zero-price or expired attestation', async function () {
-    const ctx = await deployOperatorVault()
+    const ctx = await deployWithClosedEpoch()
     const vaultAddr = await ctx.vault.getAddress()
     const att = await freshAttestation(ctx.vault, 1n, 0n)
     const sigs = await attestationSignatures(ctx, { ...att, corridorAssetPrice: PRICE_1 })
@@ -64,7 +73,7 @@ describe('VaultPolicy', function () {
   })
 
   it('accepts a well-formed attestation', async function () {
-    const ctx = await deployOperatorVault()
+    const ctx = await deployWithClosedEpoch()
     const att = await freshAttestation(ctx.vault, 1n, PRICE_1)
     const sigs = await attestationSignatures(ctx, att)
     expect(
@@ -73,7 +82,7 @@ describe('VaultPolicy', function () {
   })
 
   it('needs both signatures: either key alone is refused', async function () {
-    const ctx = await deployOperatorVault()
+    const ctx = await deployWithClosedEpoch()
     const vaultAddr = await ctx.vault.getAddress()
     const att = await freshAttestation(ctx.vault, 1n, PRICE_1)
     const [strategySig, riskSig] = await attestationSignatures(ctx, att)
@@ -241,7 +250,7 @@ describe('VaultPolicy', function () {
   })
 
   it('rejects attestations with the wrong vault, chain, epoch, window, or signer', async function () {
-    const ctx = await deployOperatorVault()
+    const ctx = await deployWithClosedEpoch()
     const vaultAddr = await ctx.vault.getAddress()
     const att = await freshAttestation(ctx.vault, 1n, PRICE_1)
     const sigs = await attestationSignatures(ctx, att)
@@ -257,6 +266,13 @@ describe('VaultPolicy', function () {
     const wrongChainSigs = await attestationSignatures(ctx, wrongChain)
     await expect(ctx.harness.verifyAttestation(wrongChain, ...wrongChainSigs, 1n, vaultAddr)).to.be
       .reverted
+
+    // Correctly signed, but for an epoch that never closed.
+    const unclosed = { ...att, epochId: 2n }
+    const unclosedSigs = await attestationSignatures(ctx, unclosed)
+    await expect(
+      ctx.harness.verifyAttestation(unclosed, ...unclosedSigs, 2n, vaultAddr)
+    ).to.be.revertedWithCustomError(ctx.vault, 'InvalidAttestation')
   })
 
   it('rejects a config with a zero duration or size', async function () {

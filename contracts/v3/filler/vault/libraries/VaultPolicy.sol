@@ -614,17 +614,14 @@ library VaultPolicy {
     return att.corridorAssetPrice;
   }
 
-  /// @dev A signed price can only settle an epoch while that epoch could still settle the
-  ///      normal way: until anyone may void a deposit epoch (`valuationTimeout` after close)
-  ///      or exit a redeem epoch in kind (`emergencyExitTimeout` after close). Without this
-  ///      the risk key can get a co-signature on a far-off `validUntil` and apply a stale
-  ///      price whenever it suits. Bounds the time of use, not `validUntil`, so an honest
-  ///      signer needs no knowledge of the deadline. The vault only verifies attestations
-  ///      for closed epochs; `closedAt == 0` is skipped so an open epoch is never affected.
+  /// @dev An attestation settles its epoch only until anyone else may: the void of a deposit
+  ///      epoch (`valuationTimeout` after close) or the in-kind exit of a redeem epoch
+  ///      (`emergencyExitTimeout`). Otherwise a far-off `validUntil` lets the keys bank a price
+  ///      and apply it whenever it suits. Bounds the time of use, so signers need not know it.
+  ///      Both vault callers pass a Closed epoch, so `closedAt` is always set.
   function _requireWithinEpochDeadline(uint256 epochId, address vault) private view {
     IVaultEpochClock clock = IVaultEpochClock(vault);
     (, bool isDeposit,,, uint64 closedAt,,,,,,,) = clock.epochs(epochId);
-    if (closedAt == 0) return;
     uint256 lifetime = isDeposit ? clock.valuationTimeout() : clock.emergencyExitTimeout();
     if (block.timestamp > uint256(closedAt) + lifetime) revert VaultErrors.InvalidAttestation();
   }
