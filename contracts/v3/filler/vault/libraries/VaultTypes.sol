@@ -6,10 +6,10 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Constructor / factory payloads and shared storage structs for OperatorVault.
 library VaultTypes {
-  /// @notice Performance-fee marks. `highWaterWad` is the absolute mark, WAD assets per share,
-  ///         and only ever rises. The basket legs are WAD-scaled atomic units of each asset per
-  ///         share, full width, since a leg that saturated would understate the basket and
-  ///         re-charge it.
+  /// @notice Performance-fee benchmarks in WAD atomic units per share.
+  /// @dev `highWaterWad` uses settlement units and cannot decrease while supply is nonzero;
+  ///      an empty-supply checkpoint resets it to one WAD. Basket components use each asset's
+  ///      own units. Full-width storage prevents saturation from understating the fee threshold.
   struct Marks {
     uint256 highWaterWad;
     uint256 settlementWad;
@@ -49,7 +49,8 @@ library VaultTypes {
     uint256 minReserveSettlement;
     uint256 minReserveCorridor;
     uint256 maxOrderLifetime;
-    /// @dev Durations run from the epoch opening, timeouts from its close.
+    /// @dev Epoch durations run from opening; valuation and emergency timeouts run from close.
+    ///      The redemption close cooldown runs from the previous redemption settlement.
     uint256 depositEpochDuration;
     uint256 redemptionEpochDuration;
     uint256 redemptionCloseCooldown;
@@ -69,11 +70,11 @@ library VaultTypes {
     uint256 minRedeemShares;
     bool enableYield;
     uint256 minLiquidSettlement;
-    /// @dev Adds the all-time-high price per share as a second bar under the performance fee.
+    /// @dev Require NAV to exceed the absolute high-water mark as well as the revalued basket.
     bool perfFloorEnabled;
   }
 
-  /// @notice Full immutable constructor payload.
+  /// @notice Full constructor payload: immutable terms plus initial roles and liquid-settlement floor.
   struct VaultConfig {
     IERC20 settlementAsset;
     IERC20 corridorAsset;

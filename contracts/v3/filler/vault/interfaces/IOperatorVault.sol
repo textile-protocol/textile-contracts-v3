@@ -13,12 +13,12 @@ import { VaultLib } from "../libraries/VaultLib.sol";
  *         and the preview methods are not implemented.
  */
 interface IOperatorVault {
-  /// @dev Every vault event lives here: several are emitted from VaultPolicy delegatecalls
-  ///      and would otherwise be missing from the vault ABI.
+  /// @dev Shared events include those emitted by VaultPolicy delegatecalls, making them
+  ///      available in the vault ABI alongside events declared on OperatorVault.
   event SettlementPrepared(uint256 needed, uint256 recalled);
   event IdleAllocated(uint256 assets);
   event IdleRecalled(uint256 assets);
-  /// @notice The deferred emergency slice finally crossed out of the adapter.
+  /// @notice Yield tokens transferred from the adapter for pending emergency claims.
   event YieldPullSynced(uint256 assets);
   event ClaimedYield(
     address indexed controller, address indexed receiver, uint256 indexed epochId, uint256 yieldOut
@@ -35,7 +35,7 @@ interface IOperatorVault {
   event RiskAdminTransferred(address indexed previous, address indexed current);
   event GuardianUpdated(address indexed previous, address indexed current);
   event FeeRecipientUpdated(address indexed previous, address indexed current);
-  /// @notice The earliest event on a vault names the deploy-time floor as `previous`.
+  /// @notice The liquid floor changed. The first update uses the constructor value as `previous`.
   event MinLiquidSettlementUpdated(uint256 previous, uint256 current);
   event FeeAccrued(address indexed recipient, uint256 shares, uint256 elapsed);
   /// @notice A performance-fee mark moved; all three are logged (WAD per share, basket legs in atomic units).
@@ -48,6 +48,8 @@ interface IOperatorVault {
   event TokenSwept(address indexed token, address indexed to, uint256 amount);
   event ETHSwept(address indexed to, uint256 amount);
 
+  /// @notice Queue settlement assets for a deposit epoch. Owner or approved operator only.
+  /// @dev Assets remain excluded from free inventory until the epoch is processed.
   function requestDeposit(uint256 assets, address controller, address owner)
     external
     returns (uint256 requestId);
@@ -59,6 +61,8 @@ interface IOperatorVault {
     external
     returns (uint256 requestId);
 
+  /// @notice Cancel an open deposit before its cutoff and refund its controller.
+  /// @dev Controller or approved operator only.
   function cancelDeposit(uint256 requestId, address controller) external;
 
   /// @notice Queue a redemption. Minimum `minRedeemShares`, unless it is the owner's whole balance.
@@ -69,10 +73,14 @@ interface IOperatorVault {
   /// @notice Pay a processed or settled request out to `receiver`. The vault itself is refused.
   function claim(uint256 requestId, address controller, address receiver) external;
 
+  /// @notice Grant or revoke an operator's authority over the caller's requests and shares.
   function setOperator(address operator, bool approved) external returns (bool);
 
+  /// @notice Close an open deposit epoch at or after its cutoff. Anyone may call.
   function closeDepositEpoch(uint256 epochId) external;
 
+  /// @notice Convert a closed deposit epoch into claimable shares at the attested post-fee price.
+  /// @dev Anyone may call while unpaused. An empty epoch needs no attestation.
   function processDepositEpoch(
     uint256 epochId,
     VaultLib.NavAttestation calldata attestation,
@@ -80,9 +88,10 @@ interface IOperatorVault {
     bytes calldata riskSignature
   ) external;
 
+  /// @notice Make a closed deposit epoch refundable once its valuation timeout elapses. Anyone may call.
   function voidDepositEpoch(uint256 epochId) external;
 
-  /// @notice Close the open redeem epoch. Bumps the trading epoch (every signed order dies) and
+  /// @notice Close the open redeem epoch. Advances the trading epoch to invalidate signed orders and
   ///         holds the vault close-only until the epoch settles. The operator admin and
   ///         strategy signer may close at any time; anyone else only once the epoch has been
   ///         open `redemptionEpochDuration + valuationTimeout` and `redemptionCloseCooldown`
@@ -113,7 +122,7 @@ interface IOperatorVault {
   ///         Excluded from NAV and off-limits to every recall.
   function yieldReserves() external view returns (uint256 weight, uint256 pendingPull);
 
-  /// @notice Guardian-only sweep of a non-working ERC-20. Reverts for the share token, both
+  /// @notice Guardian-only recovery of an unrelated ERC-20. Reverts for the share token, both
   ///         assets, and the yield token.
   function sweepToken(address token, address to) external;
 
@@ -122,15 +131,16 @@ interface IOperatorVault {
 
   /// @notice Recall enough settlement from the yield adapter so at least `needed` sits liquid.
   ///         Reverts `InsufficientSettlement` when the recall comes up short. Anyone may call.
-  /// @dev Not atomic with a later fill: anyone can `allocateIdle` in between and make the fill
-  ///      revert. Griefing only; fill through `VaultOrderExecutor.fill` when that matters.
+  /// @dev A later `allocateIdle` can reduce liquidity before a separate fill transaction.
+  ///      `VaultOrderExecutor.fill` combines preparation and execution atomically.
   function prepareSettlement(uint256 needed) external;
 
   /// @notice Supply idle settlement above `minLiquidSettlement` to the yield adapter. No-op
   ///         when the adapter is unset, the vault is paused, or close-only. Anyone may call.
   function allocateIdle() external;
 
-  /// @notice Recall the full adapter position back to the vault. Anyone may call.
+  /// @notice Attempt to synchronize pending yield claims, then recall the unreserved adapter position.
+  ///         Anyone may call; yield tokens still reserved for emergency claims remain protected.
   function recallAll() external;
 
   function settlementAsset() external view returns (IERC20);
@@ -159,6 +169,7 @@ interface IOperatorVault {
   function perfFloorEnabled() external view returns (bool);
   function tradingEpoch() external view returns (uint256);
   function paused() external view returns (bool);
+  /// @notice Whether a closed redemption epoch restricts trading to sales of corridor assets.
   function closeOnly() external view returns (bool);
   /// @notice Economic free settlement: liquid plus the adapter position.
   function freeSettlement() external view returns (uint256);
@@ -167,7 +178,9 @@ interface IOperatorVault {
   function liquidSettlement() external view returns (uint256);
   /// @notice Corridor net of pending deposits and reserved payouts.
   function freeCorridor() external view returns (uint256);
+  /// @notice Free settlement above the trading reserve; includes unreserved adapter assets.
   function quotableSettlement() external view returns (uint256);
+  /// @notice Free corridor assets above the trading reserve.
   function quotableCorridor() external view returns (uint256);
   /// @notice Last settled NAV, not a live mark.
   function totalAssets() external view returns (uint256);

@@ -13,7 +13,7 @@ import { VaultTypes } from "./libraries/VaultTypes.sol";
  * @title OperatorVaultFactory
  * @notice Deploys immutable OperatorVaults. An operator may hold any number of vaults for the
  *         same (settlement, corridor) pair; the factory indexes them per (operatorAdmin,
- *         settlement, corridor, version) in deployment order. Holds no assets and has no
+ *         settlement, corridor, version) in indexing order. Holds no assets and has no
  *         authority over deployed vaults.
  */
 contract OperatorVaultFactory is IOperatorVaultFactory {
@@ -39,7 +39,8 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
   }
   mapping(address => ProtocolTerms) private _protocolTerms;
 
-  /// @dev Vaults per (operatorAdmin, settlement, corridor, VERSION), oldest first.
+  /// @dev Vaults per (operatorAdmin, settlement, corridor, VERSION), in insertion order.
+  ///      Deployment and admin handover both append to the destination index.
   mapping(bytes32 => address[]) private _vaultsOf;
   mapping(address => bool) public override isVault;
 
@@ -205,7 +206,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     address[] storage from = _vaultsOf[_key(fromAdmin, settlementAsset, corridorAsset)];
     uint256 index = _indexOf(from, msg.sender);
 
-    // Order-preserving removal, not swap-and-pop: `vaultOf` must keep answering with the newest vault.
+    // Preserve insertion order so `vaultOf` returns the most recently indexed vault.
     for (uint256 i = index; i + 1 < from.length; ++i) {
       from[i] = from[i + 1];
     }
@@ -216,8 +217,7 @@ contract OperatorVaultFactory is IOperatorVaultFactory {
     emit VaultRekeyed(msg.sender, fromAdmin, toAdmin, settlementAsset, corridorAsset);
   }
 
-  /// @dev The revert is unreachable from a vault of ours (`acceptOperatorAdmin` passes the key it
-  ///      was pushed under) and kept on purpose: it stops any caller shifting someone else's list.
+  /// @dev Require membership before removing a vault from an operator's index.
   function _indexOf(address[] storage vaults, address vault) private view returns (uint256) {
     uint256 length = vaults.length;
     for (uint256 i = 0; i < length; ++i) {

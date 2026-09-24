@@ -34,9 +34,8 @@ library VaultLib {
     keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
   bytes32 internal constant PERMIT2_NAME_HASH = keccak256("Permit2");
 
-  /// @dev No `nav`: the vault derives it from the floors and the price. Vaults built before
-  ///      that verify the ten-field struct under domain version "1"; this one is "2", and
-  ///      `eip712Domain()` is how a signer tells them apart.
+  /// @dev Domain version "2" signs asset floors and a corridor price; NAV is derived from
+  ///      those values. Signers discover the domain through `eip712Domain()`.
   bytes32 internal constant ATTESTATION_TYPEHASH = keccak256(
     "NavAttestation(address vault,uint256 chainId,uint256 epochId,uint256 corridorAssetPrice,uint256 lastSettledNav,uint256 freeSettlement,uint256 freeCorridor,uint256 validAfter,uint256 validUntil)"
   );
@@ -79,8 +78,8 @@ library VaultLib {
   ) internal pure returns (uint256) {
     if (freeCorridor == 0 || priceWad == 0) return freeSettlement;
     if (settlementDecimals >= corridorDecimals) {
-      uint256 exp = uint256(settlementDecimals - corridorDecimals);
-      return freeSettlement + Math.mulDiv(freeCorridor, priceWad, WAD / (10 ** exp));
+      uint256 decimalDifference = uint256(settlementDecimals - corridorDecimals);
+      return freeSettlement + Math.mulDiv(freeCorridor, priceWad, WAD / (10 ** decimalDifference));
     }
     uint256 scale = 10 ** uint256(corridorDecimals - settlementDecimals);
     return freeSettlement + Math.mulDiv(freeCorridor, priceWad, scale * WAD);
@@ -113,13 +112,13 @@ library VaultLib {
 
   /// @notice NAV above the higher mark: the revalued basket strips FX on held inventory, the
   ///         absolute mark (zero when the floor is off) defers gain while under the high.
-  function chargeableGain(uint256 navNow, uint256 basketValue, uint256 absValue)
+  function chargeableGain(uint256 navNow, uint256 basketValue, uint256 highWaterValue)
     internal
     pure
     returns (uint256)
   {
-    uint256 bar = Math.max(basketValue, absValue);
-    return navNow > bar ? navNow - bar : 0;
+    uint256 feeThreshold = Math.max(basketValue, highWaterValue);
+    return navNow > feeThreshold ? navNow - feeThreshold : 0;
   }
 
   /// @notice `feeWad` of `gain`, minted against post-fee NAV so holders keep exactly `1 - feeWad`.
@@ -139,8 +138,8 @@ library VaultLib {
     return Math.mulDiv(perShareWad, supply, WAD);
   }
 
-  /// @notice `units` per share, WAD-scaled. Rounds up so `perShareTotal` reads back at least what
-  ///         was written.
+  /// @notice Atomic asset units per share, WAD-scaled and rounded up.
+  /// @dev At the same nonzero supply, `perShareTotal` reads back at least the original units.
   function basketPerShare(uint256 units, uint256 supply) internal pure returns (uint256) {
     if (supply == 0) return 0;
     return Math.mulDiv(units, WAD, supply, Math.Rounding.Ceil);
@@ -190,10 +189,11 @@ library VaultLib {
     return MessageHashUtils.toTypedDataHash(domain, structHash);
   }
 
-  /// @notice EOA signature check. Strategy and risk signers are keys, not contracts.
+  /// @notice Recover an EOA signature for a strategy or risk signer.
+  /// @dev Contract-signature validation is not performed for these two signer roles.
   function isSigner(address signer, bytes32 hash, bytes memory signature) internal pure returns (bool) {
-    (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(hash, signature);
-    return err == ECDSA.RecoverError.NoError && recovered == signer;
+    (address recovered, ECDSA.RecoverError recoveryError,) = ECDSA.tryRecover(hash, signature);
+    return recoveryError == ECDSA.RecoverError.NoError && recovered == signer;
   }
 
   function attestationDigest(NavAttestation memory att, address vault, uint256 chainId)

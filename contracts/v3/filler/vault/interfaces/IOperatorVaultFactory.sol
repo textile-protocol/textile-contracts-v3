@@ -25,7 +25,8 @@ interface IOperatorVaultFactory {
     view
     returns (address);
 
-  /// @notice Every vault the operator holds for the pair, oldest first.
+  /// @notice Every vault indexed to this operator and pair, in insertion order.
+  /// @dev Admin handovers append the transferred vault to the destination index.
   function vaultsOf(address operatorAdmin, address settlementAsset, address corridorAsset)
     external
     view

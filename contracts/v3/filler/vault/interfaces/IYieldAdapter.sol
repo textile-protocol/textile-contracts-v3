@@ -4,9 +4,9 @@ pragma solidity 0.8.30;
 
 /**
  * @title IYieldAdapter
- * @notice Idle-yield adapter for OperatorVault. One instance per vault; the vault is the only
- *         caller of the mutating functions. The adapter custodies the yield position (e.g.
- *         aTokens), never the vault's working balance.
+ * @notice Idle-yield adapter for OperatorVault. One instance per vault; only its vault may
+ *         deploy, recall, or transfer the yield position. `skim` is permissionless and sends
+ *         unrelated tokens to the vault. The adapter holds the yield position (e.g. aTokens).
  */
 interface IYieldAdapter {
   /// @notice Underlying asset the adapter accepts. The vault's settlement asset.

@@ -21,8 +21,8 @@ import { VaultErrors } from "./VaultErrors.sol";
 import { VaultLib } from "./VaultLib.sol";
 import { VaultTypes } from "./VaultTypes.sol";
 
-/// @dev The vault's own public getters `verifyAttestation` reads to bound an attestation's
-///      lifetime. Declared here rather than on `IOperatorVault` so no caller changes.
+/// @dev Vault getters used to limit attestation use to the epoch settlement window.
+///      The return tuple must match the public `OperatorVault.epochs` getter.
 interface IVaultEpochClock {
   function epochs(uint256 epochId)
     external
@@ -45,20 +45,19 @@ interface IVaultEpochClock {
   function emergencyExitTimeout() external view returns (uint256);
 }
 
-/// @notice Linked library holding the vault logic that does not fit under the 24kb cap:
-///         order policy, config checks, fee accrual, admin lifecycle, sweeps, adapter plumbing.
-///         Non-view functions run as delegatecalls, so the adapter always sees the vault as caller.
-/// @dev Not a trust boundary: the linked address is part of the vault's identity and
-///      `VaultVerificationBundle.test.ts` pins it.
+/// @notice Configuration, order validation, fee accounting, administration, and yield operations.
+/// @dev Linked to keep OperatorVault within the deployment size limit. Delegatecalls use
+///      the vault's storage and address; the vault entry points enforce caller permissions.
+///      The linked library address is fixed in the vault bytecode and must be verified with it.
 library VaultPolicy {
   using SafeERC20 for IERC20;
 
-  /// @notice Caps on the deploy-time fee immutables. House terms are 10% management.
+  /// @notice Maximum annual management-fee rate, WAD-scaled (25%).
   uint256 internal constant MAX_MANAGEMENT_FEE_WAD = 25e16;
   /// @notice Below 100% so `nav - feeAssets` in `performanceFeeShares` stays positive.
   uint256 internal constant MAX_PERFORMANCE_FEE_WAD = 50e16;
   uint8 internal constant MAX_TOKEN_DECIMALS = 18;
-  /// @notice Epoch timestamps are uint64, so `now + duration` fits by construction.
+  /// @dev Reserves half the uint64 range for the timestamp added to each duration.
   uint256 internal constant MAX_DURATION = type(uint64).max / 2;
 
   struct OrderContext {
@@ -76,6 +75,9 @@ library VaultPolicy {
     bool closeOnly;
   }
 
+  /// @notice Validate the constructor configuration and read the two asset precisions.
+  /// @dev Pure checks precede token calls. Missing required addresses take precedence
+  ///      over invalid pairs, roles, and numeric limits.
   /// @return settlementDecimals_ The settlement asset's decimals.
   /// @return corridorDecimals_ The corridor asset's decimals.
   function validateConfig(VaultTypes.VaultConfig memory cfg)
@@ -83,35 +85,58 @@ library VaultPolicy {
     view
     returns (uint8 settlementDecimals_, uint8 corridorDecimals_)
   {
-    if (
-      address(cfg.settlementAsset) == address(0) || address(cfg.corridorAsset) == address(0)
-        || cfg.reactor == address(0) || cfg.permit2 == address(0) || cfg.preferredFillerValidation == address(0)
-        || cfg.operatorAdmin == address(0) || cfg.strategySigner == address(0) || cfg.riskAdmin == address(0)
-        || cfg.riskSigner == address(0) || cfg.guardian == address(0) || cfg.feeRecipient == address(0)
-    ) revert VaultErrors.ZeroAddress();
+    _validateRequiredAddresses(cfg);
     if (address(cfg.settlementAsset) == address(cfg.corridorAsset)) revert VaultErrors.InvalidPair();
     if (cfg.strategySigner == cfg.riskSigner) revert VaultErrors.InvalidParams();
     if (cfg.operatorAdmin == cfg.riskAdmin) revert VaultErrors.InvalidParams();
-    if (
-      cfg.maxOrderInputSettlement == 0 || cfg.maxOrderInputCorridor == 0 || cfg.maxOrderLifetime == 0
-        || cfg.depositEpochDuration == 0 || cfg.redemptionEpochDuration == 0 || cfg.redemptionCloseCooldown == 0
-        || cfg.emergencyExitTimeout == 0 || cfg.valuationTimeout == 0
-        || cfg.riskSignerDelay == 0 || cfg.minDepositAssets == 0 || cfg.minRedeemShares == 0
-    ) revert VaultErrors.InvalidParams();
+
+    _validateMinimums(cfg);
     if (cfg.yieldAdapter == address(0) && cfg.minLiquidSettlement != 0) revert VaultErrors.InvalidParams();
+    _validateTiming(cfg);
+    if (cfg.managementFeeWad > MAX_MANAGEMENT_FEE_WAD || cfg.performanceFeeWad > MAX_PERFORMANCE_FEE_WAD) {
+      revert VaultErrors.InvalidParams();
+    }
+
+    settlementDecimals_ = _requireDecimals(address(cfg.settlementAsset));
+    corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
+  }
+
+  /// @dev Assets, trading infrastructure, and roles are required. The yield adapter is optional.
+  function _validateRequiredAddresses(VaultTypes.VaultConfig memory cfg) private pure {
+    if (address(cfg.settlementAsset) == address(0) || address(cfg.corridorAsset) == address(0)) {
+      revert VaultErrors.ZeroAddress();
+    }
+    if (cfg.reactor == address(0) || cfg.permit2 == address(0) || cfg.preferredFillerValidation == address(0)) {
+      revert VaultErrors.ZeroAddress();
+    }
+    if (cfg.operatorAdmin == address(0) || cfg.strategySigner == address(0)) revert VaultErrors.ZeroAddress();
+    if (cfg.riskAdmin == address(0) || cfg.riskSigner == address(0)) revert VaultErrors.ZeroAddress();
+    if (cfg.guardian == address(0) || cfg.feeRecipient == address(0)) revert VaultErrors.ZeroAddress();
+  }
+
+  /// @dev Zero reserves and fees are allowed. A zero corridor-deposit minimum disables that path.
+  function _validateMinimums(VaultTypes.VaultConfig memory cfg) private pure {
+    if (cfg.maxOrderInputSettlement == 0 || cfg.maxOrderInputCorridor == 0 || cfg.maxOrderLifetime == 0) {
+      revert VaultErrors.InvalidParams();
+    }
+    if (cfg.depositEpochDuration == 0 || cfg.redemptionEpochDuration == 0 || cfg.redemptionCloseCooldown == 0) {
+      revert VaultErrors.InvalidParams();
+    }
+    if (cfg.emergencyExitTimeout == 0 || cfg.valuationTimeout == 0 || cfg.riskSignerDelay == 0) {
+      revert VaultErrors.InvalidParams();
+    }
+    if (cfg.minDepositAssets == 0 || cfg.minRedeemShares == 0) revert VaultErrors.InvalidParams();
+  }
+
+  /// @dev Bound stored timestamps and leave a valuation window before permissionless emergency exit.
+  function _validateTiming(VaultTypes.VaultConfig memory cfg) private pure {
     _requireSafeDuration(cfg.depositEpochDuration);
     _requireSafeDuration(cfg.redemptionEpochDuration);
     _requireSafeDuration(cfg.redemptionCloseCooldown);
     _requireSafeDuration(cfg.emergencyExitTimeout);
     _requireSafeDuration(cfg.valuationTimeout);
     _requireSafeDuration(cfg.riskSignerDelay);
-    // Otherwise the permissionless exit pauses the vault before the operator can settle.
     if (cfg.emergencyExitTimeout <= cfg.valuationTimeout) revert VaultErrors.InvalidParams();
-    if (cfg.managementFeeWad > MAX_MANAGEMENT_FEE_WAD || cfg.performanceFeeWad > MAX_PERFORMANCE_FEE_WAD) {
-      revert VaultErrors.InvalidParams();
-    }
-    settlementDecimals_ = _requireDecimals(address(cfg.settlementAsset));
-    corridorDecimals_ = _requireDecimals(address(cfg.corridorAsset));
   }
 
   /// @notice One fee checkpoint's inputs. A zero `priceWad` skips the performance leg.
@@ -125,63 +150,81 @@ library VaultPolicy {
     uint256 performanceFeeWad;
   }
 
-  /// @notice Both fee legs for one checkpoint, each split with the protocol on its own terms.
-  ///         Delegatecalled: writes both marks and logs them.
+  /// @notice Calculate management and performance shares, then split each fee with the protocol.
+  /// @dev Updates fee marks in vault storage; the caller mints the returned shares.
   function checkpointAccrual(VaultTypes.Marks storage marks, Checkpoint memory c)
     external
     returns (uint256 operatorShares, uint256 protocolShares, address protocolRecipient)
   {
     // Performance is charged net of the management leg.
-    uint256 mgmt = VaultLib.feeShares(c.supply, c.managementFeeWad, c.elapsed);
-    uint256 perf;
+    uint256 managementShares = VaultLib.feeShares(c.supply, c.managementFeeWad, c.elapsed);
+    uint256 performanceShares;
     if (c.supply == 0) {
-      // Empty: both marks reset.
+      // Empty supply resets the basket to zero and the absolute mark to one WAD.
       _storeMarks(marks, true, 0, 0, 0, VaultLib.WAD);
     } else if (c.priceWad != 0) {
-      perf = _performanceLeg(marks, c, c.supply + mgmt);
+      performanceShares = _performanceLeg(marks, c, c.supply + managementShares);
     }
-    if (mgmt + perf == 0) return (0, 0, address(0));
-    uint256 mgmtShareWad;
-    uint256 perfShareWad;
-    (protocolRecipient, mgmtShareWad, perfShareWad) = _factory().protocolFeeFor(address(this));
-    (uint256 mgmtOperator, uint256 mgmtProtocol) = VaultLib.splitFee(mgmt, mgmtShareWad);
-    (uint256 perfOperator, uint256 perfProtocol) = VaultLib.splitFee(perf, perfShareWad);
-    operatorShares = mgmtOperator + perfOperator;
-    protocolShares = mgmtProtocol + perfProtocol;
+    if (managementShares + performanceShares == 0) return (0, 0, address(0));
+    uint256 protocolManagementShareWad;
+    uint256 protocolPerformanceShareWad;
+    (protocolRecipient, protocolManagementShareWad, protocolPerformanceShareWad) =
+      _factory().protocolFeeFor(address(this));
+    (uint256 operatorManagementShares, uint256 protocolManagementShares) =
+      VaultLib.splitFee(managementShares, protocolManagementShareWad);
+    (uint256 operatorPerformanceShares, uint256 protocolPerformanceShares) =
+      VaultLib.splitFee(performanceShares, protocolPerformanceShareWad);
+    operatorShares = operatorManagementShares + operatorPerformanceShares;
+    protocolShares = protocolManagementShares + protocolPerformanceShares;
   }
 
   /// @dev Charges NAV over the revalued basket, capped at NAV over the absolute mark when the
-  ///      floor is on. `supply` is post-management.
-  function _performanceLeg(VaultTypes.Marks storage marks, Checkpoint memory c, uint256 supply)
-    private
-    returns (uint256 perf)
-  {
+  ///      floor is on. `supplyAfterManagement` includes the management-fee shares.
+  function _performanceLeg(
+    VaultTypes.Marks storage marks,
+    Checkpoint memory checkpoint,
+    uint256 supplyAfterManagement
+  ) private returns (uint256 performanceShares) {
     // A fresh basket is the inventory itself, so the first priced checkpoint charges nothing.
     bool fresh = marks.settlementWad == 0 && marks.corridorWad == 0;
-    (uint256 basketS, uint256 basketC) = fresh
-      ? (c.freeSettlement, c.freeCorridor)
-      : (VaultLib.perShareTotal(marks.settlementWad, supply), VaultLib.perShareTotal(marks.corridorWad, supply));
-    (uint8 sDec, uint8 cDec) = _decimals(c.freeCorridor != 0 || basketC != 0);
-    uint256 navNow = VaultLib.nav(c.freeSettlement, c.freeCorridor, c.priceWad, sDec, cDec);
-    uint256 basketValue = VaultLib.nav(basketS, basketC, c.priceWad, sDec, cDec);
+    (uint256 basketSettlement, uint256 basketCorridor) = fresh
+      ? (checkpoint.freeSettlement, checkpoint.freeCorridor)
+      : (
+        VaultLib.perShareTotal(marks.settlementWad, supplyAfterManagement),
+        VaultLib.perShareTotal(marks.corridorWad, supplyAfterManagement)
+      );
+    (uint8 settlementDecimals, uint8 corridorDecimals) =
+      _decimals(checkpoint.freeCorridor != 0 || basketCorridor != 0);
+    uint256 navNow = VaultLib.nav(
+      checkpoint.freeSettlement, checkpoint.freeCorridor, checkpoint.priceWad, settlementDecimals, corridorDecimals
+    );
+    uint256 basketValue =
+      VaultLib.nav(basketSettlement, basketCorridor, checkpoint.priceWad, settlementDecimals, corridorDecimals);
     uint256 markWad = marks.highWaterWad;
-    uint256 floorValue = navNow > basketValue ? _floorValue(markWad, supply) : 0;
+    uint256 floorValue = navNow > basketValue ? _floorValue(markWad, supplyAfterManagement) : 0;
     uint256 gain = VaultLib.chargeableGain(navNow, basketValue, floorValue);
 
-    perf = VaultLib.performanceFeeShares(navNow, supply, gain, c.performanceFeeWad);
-    uint256 supplyAfter = supply + perf;
+    performanceShares =
+      VaultLib.performanceFeeShares(navNow, supplyAfterManagement, gain, checkpoint.performanceFeeWad);
+    uint256 supplyAfterFees = supplyAfterManagement + performanceShares;
 
-    // Charged in full, the basket becomes the inventory. Floored, the charged slice joins the
-    // settlement leg and the rest stays owed. No mint, no move.
-    if (floorValue > basketValue) basketS += gain;
-    else (basketS, basketC) = (c.freeSettlement, c.freeCorridor);
+    // When the absolute floor limits the fee, only chargeable gain enters the settlement
+    // basket; the rest remains eligible for a later fee. Otherwise use current inventory.
+    // An existing basket is stored only when performance shares are nonzero.
+    if (floorValue > basketValue) basketSettlement += gain;
+    else (basketSettlement, basketCorridor) = (checkpoint.freeSettlement, checkpoint.freeCorridor);
     _storeMarks(
-      marks, fresh || perf != 0, basketS, basketC, supplyAfter, VaultLib.markAfter(navNow, supplyAfter, markWad)
+      marks,
+      fresh || performanceShares != 0,
+      basketSettlement,
+      basketCorridor,
+      supplyAfterFees,
+      VaultLib.markAfter(navNow, supplyAfterFees, markWad)
     );
   }
 
-  /// @notice Fold a processed deposit into the basket leg it arrived in: the basket's value grows
-  ///         by exactly the epoch's value, so the new shares carry none of the gain deferred before them.
+  /// @notice Add deposited assets to the matching basket component and spread it over the new supply.
+  /// @dev Uses atomic asset units before per-share rounding, preserving deferred gains for existing shares.
   /// @param supply Supply before `shares` were minted.
   /// @param attestedS Settlement floor the checkpoint that just ran priced.
   /// @param attestedC Corridor floor the checkpoint that just ran priced.
@@ -194,44 +237,43 @@ library VaultPolicy {
     uint256 attestedS,
     uint256 attestedC
   ) external {
-    // A fresh basket starts from the floors the checkpoint priced, not from live inventory:
-    // surplus that arrived after the attestation was signed stays chargeable gain instead of
-    // being folded in unpriced (audit F-05).
+    // Initialize from attested balances so surplus received after signing remains
+    // eligible for a performance fee at a later checkpoint.
     bool fresh = marks.settlementWad == 0 && marks.corridorWad == 0;
-    uint256 basketS = fresh ? attestedS : VaultLib.perShareTotal(marks.settlementWad, supply);
-    uint256 basketC = fresh ? attestedC : VaultLib.perShareTotal(marks.corridorWad, supply);
-    if (inCorridor) basketC += assets;
-    else basketS += assets;
-    _storeMarks(marks, true, basketS, basketC, supply + shares, marks.highWaterWad);
+    uint256 basketSettlement = fresh ? attestedS : VaultLib.perShareTotal(marks.settlementWad, supply);
+    uint256 basketCorridor = fresh ? attestedC : VaultLib.perShareTotal(marks.corridorWad, supply);
+    if (inCorridor) basketCorridor += assets;
+    else basketSettlement += assets;
+    _storeMarks(marks, true, basketSettlement, basketCorridor, supply + shares, marks.highWaterWad);
   }
 
-  /// @dev Stores `units` of each leg per share over `supply` when `rebase`, sets the absolute
-  ///      mark, and logs all three marks when any of them moved.
+  /// @dev When `rebase` is true, store both asset quantities per share, rounding up.
+  ///      Always update the absolute mark and emit all three values if any mark changes.
   function _storeMarks(
     VaultTypes.Marks storage marks,
     bool rebase,
-    uint256 unitsS,
-    uint256 unitsC,
+    uint256 settlementUnits,
+    uint256 corridorUnits,
     uint256 supply,
     uint256 newMarkWad
   ) private {
-    (uint256 s, uint256 k) = (marks.settlementWad, marks.corridorWad);
-    bool moved = newMarkWad != marks.highWaterWad;
-    if (moved) marks.highWaterWad = newMarkWad;
+    (uint256 settlementMark, uint256 corridorMark) = (marks.settlementWad, marks.corridorWad);
+    bool changed = newMarkWad != marks.highWaterWad;
+    if (changed) marks.highWaterWad = newMarkWad;
     if (rebase) {
-      (uint256 nextS, uint256 nextK) =
-        (VaultLib.basketPerShare(unitsS, supply), VaultLib.basketPerShare(unitsC, supply));
-      if (nextS != s || nextK != k) {
-        (marks.settlementWad, marks.corridorWad) = (nextS, nextK);
-        (s, k) = (nextS, nextK);
-        moved = true;
+      (uint256 nextSettlementMark, uint256 nextCorridorMark) =
+        (VaultLib.basketPerShare(settlementUnits, supply), VaultLib.basketPerShare(corridorUnits, supply));
+      if (nextSettlementMark != settlementMark || nextCorridorMark != corridorMark) {
+        (marks.settlementWad, marks.corridorWad) = (nextSettlementMark, nextCorridorMark);
+        (settlementMark, corridorMark) = (nextSettlementMark, nextCorridorMark);
+        changed = true;
       }
     }
-    if (moved) emit IOperatorVault.MarkUpdated(newMarkWad, s, k);
+    if (changed) emit IOperatorVault.MarkUpdated(newMarkWad, settlementMark, corridorMark);
   }
 
-  /// @dev Vault immutables, read back rather than passed (33 vault bytes per read site) and only
-  ///      when a corridor leg exists, since `nav` ignores them otherwise.
+  /// @dev Read vault immutables here to save bytecode at vault call sites. Decimals are
+  ///      unnecessary when both current inventory and the fee basket contain no corridor asset.
   function _decimals(bool corridorHeld) private view returns (uint8, uint8) {
     if (!corridorHeld) return (0, 0);
     IOperatorVault self = IOperatorVault(address(this));
@@ -249,9 +291,8 @@ library VaultPolicy {
     return IOperatorVaultFactory(IOperatorVault(address(this)).factory());
   }
 
-  /// @notice The floor keeps dust out of the queue, not holders in the vault: a request for
-  ///         the owner's whole balance is always allowed, since there is no other way out.
-  ///         That covers both fee recipients, whose dilution residue is all they hold.
+  /// @notice Require the minimum redemption size, except for an owner's full nonzero balance.
+  /// @dev The exception lets holders, including fee recipients, exit balances below the minimum.
   function validateRedeemRequest(
     uint256 shares,
     uint256 minRedeemShares,
@@ -300,8 +341,9 @@ library VaultPolicy {
     emit IOperatorVault.IdleRecalled(adapter.recall(_recallAmount(held, reserved)));
   }
 
-  /// @notice Best-effort full recall for the emergency exit: a failed withdrawal is swallowed
-  ///         and the position still stranded is reported back for in-kind distribution.
+  /// @notice Attempt to recall the unreserved position for an emergency exit.
+  /// @dev A recall revert leaves the position available for in-kind claims. Calls to
+  ///      `held()` are outside the catch and must succeed.
   /// @return stranded Free underlying still held by the adapter afterwards.
   function tryRecallAllIdle(IYieldAdapter adapter, uint256 reserved) external returns (uint256 stranded) {
     if (address(adapter) == address(0)) return 0;
@@ -320,8 +362,10 @@ library VaultPolicy {
     return reserved == 0 ? type(uint256).max : held - reserved;
   }
 
-  /// @notice Best-effort pull of the deferred emergency slice. Never reverts.
-  /// @return synced True when it crossed, so the vault can clear its reserve.
+  /// @notice Attempt to move yield tokens reserved for emergency claims into the vault.
+  /// @dev Returns false when `transferHeld` reverts. A successful transfer may be clamped
+  ///      to the adapter's balance; claimants share the yield tokens actually received.
+  /// @return synced True if the adapter call succeeds, allowing the pending reserve to clear.
   function syncPendingYield(IYieldAdapter adapter, uint256 owed) external returns (bool synced) {
     try adapter.transferHeld(address(this), owed) returns (uint256 sent) {
       emit IOperatorVault.YieldPullSynced(sent);
@@ -347,6 +391,8 @@ library VaultPolicy {
     emit IOperatorVault.ClaimedYield(controller, receiver, epochId, yieldOut);
   }
 
+  /// @notice Check order identity, limits, inventory, and preferred fillers.
+  /// @dev Malformed validation data can revert during ABI decoding.
   function orderPolicyOk(LimitOrder memory order, OrderContext memory ctx) external view returns (bool) {
     return _orderPolicyOk(order, ctx);
   }
@@ -363,7 +409,7 @@ library VaultPolicy {
     OutputToken memory output = order.outputs[0];
     if (output.recipient != ctx.vault) return false;
     if (output.amount == 0 || order.input.amount == 0) return false;
-    // Fixed input only. Implied by the Permit2 digest too, but stated here on purpose.
+    // Permit2 authorizes the exact input amount; variable-input orders are not supported.
     if (order.input.maxAmount != order.input.amount) return false;
 
     address inputToken = address(order.input.token);
@@ -391,6 +437,9 @@ library VaultPolicy {
     return true;
   }
 
+  /// @notice Validate the Permit2 digest, order policy, and both EOA signer signatures.
+  /// @dev Returns the ERC-1271 failure value for rejected orders or signatures; malformed
+  ///      encodings and failed external reads can revert.
   function validateEnvelope(bytes32 hash, bytes calldata signature, address vault)
     external
     view
@@ -442,6 +491,7 @@ library VaultPolicy {
               ADMIN LIFECYCLE (delegatecalled by the vault)
   //////////////////////////////////////////////////////////////*/
 
+  /// @notice Replace the strategy signer while keeping it distinct from current and pending risk signers.
   function setStrategySigner(VaultTypes.Roles storage roles, address next, uint256 newTradingEpoch)
     external
   {
@@ -452,8 +502,7 @@ library VaultPolicy {
     emit IOperatorVault.StrategySignerRotated(previous, next, newTradingEpoch);
   }
 
-  /// @notice Zero withdraws the pending proposal, so an unwanted signer cannot be activated
-  ///         by a third party once the delay elapses (audit L-03).
+  /// @notice Propose a risk signer for delayed activation, or cancel an existing proposal with zero.
   function proposeRiskSigner(VaultTypes.Roles storage roles, address next, uint256 delay) external {
     if (next == address(0)) {
       if (!_clearPendingRiskSigner(roles)) revert VaultErrors.InvalidParams();
@@ -467,6 +516,8 @@ library VaultPolicy {
     emit IOperatorVault.RiskSignerProposed(next, applyAt);
   }
 
+  /// @notice Activate the proposed risk signer once its delay has elapsed.
+  /// @dev Anyone may trigger activation; the proposed signer must still differ from the strategy signer.
   function acceptRiskSigner(VaultTypes.Roles storage roles, uint256 newTradingEpoch) external {
     address next = roles.pendingRiskSigner;
     if (next == address(0) || next == roles.strategySigner) revert VaultErrors.InvalidParams();
@@ -478,8 +529,8 @@ library VaultPolicy {
     emit IOperatorVault.RiskSignerRotated(previous, next, newTradingEpoch);
   }
 
-  /// @notice Two-step handover (audit L-01): nothing changes until the proposed key accepts.
-  ///         Zero withdraws the proposal.
+  /// @notice Propose an operator admin; authority changes only when that address accepts.
+  ///         Zero cancels an existing proposal.
   function proposeOperatorAdmin(VaultTypes.Roles storage roles, address next) external {
     address pending = roles.pendingOperatorAdmin;
     _checkProposal(roles, next, pending);
@@ -488,7 +539,8 @@ library VaultPolicy {
     else emit IOperatorVault.OperatorAdminProposed(next);
   }
 
-  /// @dev Delegatecalled: `msg.sender` is the accepting key and the factory rekey comes from the vault.
+  /// @notice Accept the operator-admin role and update the factory index.
+  /// @dev Under delegatecall, `msg.sender` is the proposed admin and the factory sees the vault as caller.
   function acceptOperatorAdmin(
     VaultTypes.Roles storage roles,
     address factory,
@@ -503,7 +555,7 @@ library VaultPolicy {
     emit IOperatorVault.OperatorAdminTransferred(previous, next);
   }
 
-  /// @notice Same handover shape as `proposeOperatorAdmin`, zero-cancel included.
+  /// @notice Propose a risk admin; zero cancels an existing proposal.
   function proposeRiskAdmin(VaultTypes.Roles storage roles, address next) external {
     address pending = roles.pendingRiskAdmin;
     _checkProposal(roles, next, pending);
@@ -512,6 +564,7 @@ library VaultPolicy {
     else emit IOperatorVault.RiskAdminProposed(next);
   }
 
+  /// @notice Accept the risk-admin role and cancel any pending risk-signer proposal.
   function acceptRiskAdmin(VaultTypes.Roles storage roles) external {
     address next = _acceptable(roles, roles.pendingRiskAdmin);
     roles.pendingRiskAdmin = address(0);
@@ -521,13 +574,14 @@ library VaultPolicy {
     roles.riskAdmin = next;
   }
 
+  /// @notice Replace the guardian with a nonzero address.
   function setGuardian(VaultTypes.Roles storage roles, address next) external {
     if (next == address(0)) revert VaultErrors.ZeroAddress();
     emit IOperatorVault.GuardianUpdated(roles.guardian, next);
     roles.guardian = next;
   }
 
-  /// @notice Guardian sweep of a non-working ERC-20. Delegatecalled, so the balance is the vault's.
+  /// @notice Recover an unrelated ERC-20 balance from the vault. The caller enforces guardian access.
   function sweepToken(
     address token,
     address to,
@@ -536,8 +590,7 @@ library VaultPolicy {
     address yieldToken
   ) external {
     if (to == address(0)) revert VaultErrors.ZeroAddress();
-    // The yield token stays unsweepable (audit H-01). It is zero when yield is off, and
-    // sweeping token(0) is nonsense either way.
+    // Share tokens, pool assets, and yield tokens back claims and cannot be swept.
     if (
       token == address(this) || token == settlementAsset || token == corridorAsset || token == yieldToken
     ) revert VaultErrors.InvalidPair();
@@ -547,7 +600,7 @@ library VaultPolicy {
     emit IOperatorVault.TokenSwept(token, to, amount);
   }
 
-  /// @notice Guardian sweep of forced-in ETH.
+  /// @notice Recover the vault's native-token balance. The caller enforces guardian access.
   function sweepETH(address payable to) external {
     if (to == address(0)) revert VaultErrors.ZeroAddress();
     if (to == address(this)) revert VaultErrors.InvalidParams();
@@ -575,8 +628,8 @@ library VaultPolicy {
     return pending;
   }
 
-  /// @dev One entity holding both admin roles could rotate both signers and collapse the
-  ///      dual-signature model (audit L-01). `validateConfig` enforces the same at deploy.
+  /// @dev Distinct admin addresses preserve separate authority to rotate the two signers.
+  ///      This enforces address separation, not independent ownership of those addresses.
   function _requireDistinctAdmins(VaultTypes.Roles storage roles, address next) private view {
     if (next == roles.operatorAdmin || next == roles.riskAdmin) revert VaultErrors.InvalidParams();
   }
@@ -613,11 +666,10 @@ library VaultPolicy {
     return att.corridorAssetPrice;
   }
 
-  /// @dev An attestation settles its epoch only until anyone else may: the void of a deposit
-  ///      epoch (`valuationTimeout` after close) or the in-kind exit of a redeem epoch
-  ///      (`emergencyExitTimeout`). Otherwise a far-off `validUntil` lets the keys bank a price
-  ///      and apply it whenever it suits. Bounds the time of use, so signers need not know it.
-  ///      Both vault callers pass a Closed epoch, so `closedAt` is always set.
+  /// @dev Limit use to `closedAt + valuationTimeout` for deposits and
+  ///      `closedAt + emergencyExitTimeout` for redemptions, even if `validUntil` is later.
+  ///      The boundary second allows either attested settlement or permissionless recovery.
+  ///      Both vault callers require a Closed epoch before verification.
   function _requireWithinEpochDeadline(uint256 epochId, address vault) private view {
     IVaultEpochClock clock = IVaultEpochClock(vault);
     (, bool isDeposit,,, uint64 closedAt,,,,,,,) = clock.epochs(epochId);

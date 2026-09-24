@@ -23,7 +23,8 @@ interface IFeeControllerSource {
  * @title VaultOrderExecutor
  * @notice Stateless fill wrapper for vault orders whose input may sit in the yield adapter:
  *         calls `prepareSettlement`, executes as the UniswapX filler, and forwards the input
- *         and any leftover output to `msg.sender`. Never holds tokens across transactions.
+ *         and any leftover output to `msg.sender`. Successful fills forward both token balances;
+ *         failed native refunds remain available to a later caller.
  * @dev The reactor sees this contract as the filler, so `fill()` re-imposes the order's
  *      preferred-filler binding itself; otherwise anyone could front-run the bound taker.
  */
@@ -34,7 +35,7 @@ contract VaultOrderExecutor is ReentrancyGuard {
   IReactor public immutable reactor;
   IOperatorVaultFactory public immutable factory;
 
-  /// @dev Enough for a smart wallet's receive(), small enough that a hostile one cannot starve the fill.
+  /// @dev Cap gas forwarded to the caller's native-token receiver. Refund failure is tolerated.
   uint256 private constant REFUND_GAS = 50_000;
 
   event ExecutorFill(
@@ -98,8 +99,8 @@ contract VaultOrderExecutor is ReentrancyGuard {
   /// @dev Accepts the reactor's end-of-fill refund.
   receive() external payable {}
 
-  /// @dev Never reverts: a caller that cannot take native keeps its fill and the dust waits
-  ///      for the next caller who can.
+  /// @dev Ignore a failed native refund so a rejecting receiver does not undo the fill.
+  ///      The retained balance is offered to the next caller.
   function _forwardNative() private {
     uint256 balance = address(this).balance;
     if (balance == 0) return;

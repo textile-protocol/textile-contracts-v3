@@ -1,3 +1,4 @@
+import { loadFixture } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import { AbiCoder } from 'ethers'
 import { ethers } from 'hardhat'
@@ -58,6 +59,103 @@ async function deployWithClosedEpoch() {
 }
 
 describe('VaultPolicy', function () {
+  describe('constructor validation errors', function () {
+    const requiredAddresses = [
+      'settlementAsset',
+      'corridorAsset',
+      'reactor',
+      'permit2',
+      'preferredFillerValidation',
+      'operatorAdmin',
+      'strategySigner',
+      'riskAdmin',
+      'riskSigner',
+      'guardian',
+      'feeRecipient',
+    ] as const
+    const positiveLimits = [
+      'maxOrderInputSettlement',
+      'maxOrderInputCorridor',
+      'maxOrderLifetime',
+      'depositEpochDuration',
+      'redemptionEpochDuration',
+      'redemptionCloseCooldown',
+      'emergencyExitTimeout',
+      'valuationTimeout',
+      'riskSignerDelay',
+      'minDepositAssets',
+      'minRedeemShares',
+    ] as const
+
+    for (const field of requiredAddresses) {
+      it(`reports ZeroAddress for ${field}`, async function () {
+        const ctx = await loadFixture(deployOperatorVault)
+        const cfg = await validConfig(ctx)
+        await expect(
+          ctx.harness.validateConfig({ ...cfg, [field]: ethers.ZeroAddress })
+        ).to.be.revertedWithCustomError(ctx.vault, 'ZeroAddress')
+      })
+    }
+
+    for (const field of positiveLimits) {
+      it(`reports InvalidParams for a zero ${field}`, async function () {
+        const ctx = await loadFixture(deployOperatorVault)
+        const cfg = await validConfig(ctx)
+        await expect(
+          ctx.harness.validateConfig({ ...cfg, [field]: 0n })
+        ).to.be.revertedWithCustomError(ctx.vault, 'InvalidParams')
+      })
+    }
+
+    it('preserves error precedence when several fields are invalid', async function () {
+      const ctx = await loadFixture(deployOperatorVault)
+      const cfg = await validConfig(ctx)
+      // Same assets and overlapping signers must not hide a missing required address.
+      await expect(
+        ctx.harness.validateConfig({
+          ...cfg,
+          corridorAsset: cfg.settlementAsset,
+          riskSigner: cfg.strategySigner,
+          feeRecipient: ethers.ZeroAddress,
+        })
+      ).to.be.revertedWithCustomError(ctx.vault, 'ZeroAddress')
+      await expect(
+        ctx.harness.validateConfig({
+          ...cfg,
+          corridorAsset: cfg.settlementAsset,
+          riskSigner: cfg.strategySigner,
+          maxOrderLifetime: 0n,
+        })
+      ).to.be.revertedWithCustomError(ctx.vault, 'InvalidPair')
+      // This address cannot answer decimals(); pure validation must fail first.
+      await expect(
+        ctx.harness.validateConfig({
+          ...cfg,
+          settlementAsset: ctx.other.address,
+          managementFeeWad: math.MAX_MANAGEMENT_FEE_WAD + 1n,
+        })
+      ).to.be.revertedWithCustomError(ctx.vault, 'InvalidParams')
+    })
+
+    it('keeps optional zero settings and an uncapped order lifetime valid', async function () {
+      const ctx = await loadFixture(deployOperatorVault)
+      const cfg = await validConfig(ctx)
+      await expect(
+        ctx.harness.validateConfig({
+          ...cfg,
+          maxOrderLifetime: ethers.MaxUint256,
+          minReserveSettlement: 0n,
+          minReserveCorridor: 0n,
+          managementFeeWad: 0n,
+          performanceFeeWad: 0n,
+          minDepositCorridor: 0n,
+          yieldAdapter: ethers.ZeroAddress,
+          minLiquidSettlement: 0n,
+        })
+      ).not.to.be.reverted
+    })
+  })
+
   it('rejects a zero-price or expired attestation', async function () {
     const ctx = await deployWithClosedEpoch()
     const vaultAddr = await ctx.vault.getAddress()
