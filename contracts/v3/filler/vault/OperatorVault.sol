@@ -301,7 +301,6 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IERC5267, IOperatorV
     // With zero supply, mint one share per unit of deposit value. Pre-existing surplus
     // belongs to these first shareholders and must not reduce their minted shares.
     uint256 shares = VaultLib.convertToShares(value, supply, supply == 0 ? 0 : attestedNav, Math.Rounding.Floor);
-    if (shares == 0) revert VaultErrors.ZeroAmount();
 
     _releasePending(inCorridor, assets);
     _mint(address(this), shares);

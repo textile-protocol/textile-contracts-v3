@@ -154,6 +154,8 @@ interface IOperatorVault {
   function maxOrderLifetime() external view returns (uint256);
   function maxOrderInputSettlement() external view returns (uint256);
   function maxOrderInputCorridor() external view returns (uint256);
+  function minDepositAssets() external view returns (uint256);
+  function minDepositCorridor() external view returns (uint256);
   function operatorAdmin() external view returns (address);
   function pendingOperatorAdmin() external view returns (address);
   function strategySigner() external view returns (address);

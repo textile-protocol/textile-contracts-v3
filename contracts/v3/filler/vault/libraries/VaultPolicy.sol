@@ -8,6 +8,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Address } from "@openzeppelin/contracts/utils/Address.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { LimitOrder } from "../../vendor/uniswapx/lib/LimitOrderLib.sol";
 import { OutputToken } from "../../vendor/uniswapx/base/ReactorStructs.sol";
@@ -225,6 +226,8 @@ library VaultPolicy {
 
   /// @notice Add deposited assets to the matching basket component and spread it over the new supply.
   /// @dev Uses atomic asset units before per-share rounding, preserving deferred gains for existing shares.
+  ///      Reverts unless the epoch minted one share per minimum request of `assets`. Every
+  ///      request is at least that minimum, so no request's floored claim rounds to zero.
   /// @param supply Supply before `shares` were minted.
   /// @param attestedS Settlement floor the checkpoint that just ran priced.
   /// @param attestedC Corridor floor the checkpoint that just ran priced.
@@ -237,6 +240,9 @@ library VaultPolicy {
     uint256 attestedS,
     uint256 attestedC
   ) external {
+    IOperatorVault self = IOperatorVault(address(this));
+    uint256 minDeposit = inCorridor ? self.minDepositCorridor() : self.minDepositAssets();
+    if (shares < Math.ceilDiv(assets, minDeposit)) revert VaultErrors.ZeroAmount();
     // Initialize from attested balances so surplus received after signing remains
     // eligible for a performance fee at a later checkpoint.
     bool fresh = marks.settlementWad == 0 && marks.corridorWad == 0;
