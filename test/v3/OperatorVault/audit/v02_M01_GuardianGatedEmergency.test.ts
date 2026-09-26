@@ -21,7 +21,11 @@ describe('audit v0.2 M-01 — emergency exit no longer needs the guardian', func
     await expect(ctx.vault.connect(ctx.other).settleRedeemEmergencyInKind(epochId))
       .to.emit(ctx.vault, 'Paused')
       .withArgs(ctx.other.address)
-      .and.to.emit(ctx.vault, 'RedeemEpochSettled')
+      .and.not.to.emit(ctx.vault, 'RedeemEpochSettled')
+    await expect(ctx.vault.connect(ctx.other).settleRedeemEmergencyInKind(epochId)).to.emit(
+      ctx.vault,
+      'RedeemEpochSettled'
+    )
     expect(await ctx.vault.paused()).to.equal(true)
     expect(await ctx.vault.closeOnly()).to.equal(false)
 
@@ -38,6 +42,7 @@ describe('audit v0.2 M-01 — emergency exit no longer needs the guardian', func
     const first = await closeRedeemAsAnyone(ctx)
     const timeout = await ctx.vault.emergencyExitTimeout()
     await time.increase(timeout)
+    await ctx.vault.connect(ctx.other).settleRedeemEmergencyInKind(first)
     await ctx.vault.connect(ctx.other).settleRedeemEmergencyInKind(first)
     const epochBefore = await ctx.vault.tradingEpoch()
 

@@ -118,6 +118,8 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IERC5267, IOperatorV
   /// @dev Scaled position an emergency exit owes redeemers but could not move out of the
   ///      adapter yet. Excluded from NAV. Face value via `_owedAssets`.
   uint256 internal pendingYieldPull;
+  /// @dev Timestamp of the latest pause.
+  uint256 internal pausedAt;
 
   mapping(uint256 => Epoch) public epochs;
   mapping(address => mapping(uint256 => uint256)) public requestUnits;
@@ -406,13 +408,15 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IERC5267, IOperatorV
   }
 
   /// @inheritdoc IOperatorVault
-  /// @dev Pause before reading inventory to reject fills during the split. Reset the fee
-  ///      clock without accruing management fees for the time since the last checkpoint.
+  /// @dev Reads inventory only after the pause timestamp: a fill validated before the pause may
+  ///      still be mid-callback, with its input pulled and its output not yet delivered. Reset the
+  ///      fee clock without accruing management fees for the time since the last checkpoint.
   function settleRedeemEmergencyInKind(uint256 epochId) external override nonReentrant {
     Epoch storage epoch = _closedEpoch(epochId, false);
     _requireElapsed(epoch.closedAt, emergencyExitTimeout);
     lastFeeCheckpoint = block.timestamp;
     if (!paused) _pause();
+    if (pausedAt == block.timestamp) return;
     uint256 stranded = VaultPolicy.tryRecallAllIdle(yieldAdapter, _owedAssets());
 
     uint256 supply = totalSupply();
@@ -907,6 +911,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IERC5267, IOperatorV
   /// @dev Reject fills and invalidate outstanding orders without external calls.
   function _pause() private {
     paused = true;
+    pausedAt = block.timestamp;
     _bumpTradingEpoch();
     emit Paused(msg.sender);
   }

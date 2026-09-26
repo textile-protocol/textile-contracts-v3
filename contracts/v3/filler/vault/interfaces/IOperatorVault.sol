@@ -111,7 +111,8 @@ interface IOperatorVault {
 
   /// @notice Last-resort in-kind redeem when the signers cannot attest, once
   ///         `emergencyExitTimeout` has elapsed since the epoch closed. Anyone may call.
-  ///         Pauses the vault if the guardian has not, then pays live free balances. A
+  ///         If the vault was not paused before this timestamp, the call only pauses it and
+  ///         settlement needs a second call at a later timestamp. Pays live free balances. A
   ///         position the adapter cannot pay back becomes a pro-rata in-kind claim on the
   ///         yield token, collected at claim time.
   function settleRedeemEmergencyInKind(uint256 epochId) external;

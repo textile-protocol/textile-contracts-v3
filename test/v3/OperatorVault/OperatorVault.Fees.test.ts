@@ -101,6 +101,8 @@ describe('OperatorVault — management fee', function () {
 
       // The operator never attested this epoch. The redeemers are paid from an
       // undiluted supply, and nobody is paid for the time since the last checkpoint.
+      const pause = ctx.vault.connect(ctx.lp2).settleRedeemEmergencyInKind(redeemId)
+      await expect(pause).to.not.emit(ctx.vault, 'FeeAccrued')
       const tx = ctx.vault.connect(ctx.lp2).settleRedeemEmergencyInKind(redeemId)
       await expect(tx)
         .to.emit(ctx.vault, 'RedeemEpochSettled')
