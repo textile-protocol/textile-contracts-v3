@@ -311,11 +311,16 @@ library VaultPolicy {
   }
 
   /// @notice Bind a fresh adapter clone to the calling vault. Only the settlement asset is approved.
+  /// @dev Reverts if the yield token is either working asset: yield claims pay from its whole balance.
   /// @return yieldToken Token the adapter position is held in.
-  function bindYieldAdapter(address adapter, IERC20 settlement) external returns (address yieldToken) {
+  function bindYieldAdapter(address adapter, IERC20 settlement, IERC20 corridor)
+    external
+    returns (address yieldToken)
+  {
     IYieldAdapter(adapter).initialize(address(this), address(settlement));
     settlement.forceApprove(adapter, type(uint256).max);
-    return IYieldAdapter(adapter).yieldToken();
+    yieldToken = IYieldAdapter(adapter).yieldToken();
+    if (yieldToken == address(settlement) || yieldToken == address(corridor)) revert VaultErrors.InvalidPair();
   }
 
   /// @notice Recall enough so at least `needed` is liquid. A shortfall of even 1 wei reverts.

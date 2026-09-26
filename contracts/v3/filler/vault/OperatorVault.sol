@@ -214,7 +214,7 @@ contract OperatorVault is ERC20, ReentrancyGuard, IERC1271, IERC5267, IOperatorV
     // Bound in the factory tx, so there is no front-run window on the fresh clone.
     yieldToken = cfg.yieldAdapter == address(0)
       ? address(0)
-      : VaultPolicy.bindYieldAdapter(cfg.yieldAdapter, cfg.settlementAsset);
+      : VaultPolicy.bindYieldAdapter(cfg.yieldAdapter, cfg.settlementAsset, cfg.corridorAsset);
   }
 
   /*//////////////////////////////////////////////////////////////
