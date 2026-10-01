@@ -11,6 +11,23 @@ const firstRpcUrl = (raw: string | undefined, fallback: string): string =>
     .map((s) => s.trim())
     .find(Boolean) ?? fallback
 
+/**
+ * Network `url` (+ headers) for an RPC env var. Thirdweb RPCs reject a bare
+ * client id from Node with 401 Unauthorized — the client id is scoped to our
+ * web origins — so server-side calls authenticate with `x-secret-key`. Any
+ * other URL goes out as-is.
+ */
+const rpc = (
+  raw: string | undefined,
+  fallback: string
+): { url: string; httpHeaders?: Record<string, string> } => {
+  const url = firstRpcUrl(raw, fallback)
+  const secret = process.env.THIRDWEB_SECRET
+  return url.includes('.rpc.thirdweb.com/') && secret
+    ? { url, httpHeaders: { 'x-secret-key': secret } }
+    : { url }
+}
+
 const config: HardhatUserConfig = {
   solidity: {
     version: '0.8.30',
@@ -80,38 +97,38 @@ const config: HardhatUserConfig = {
       chainId: 31337,
     },
     mainnet: {
-      url: firstRpcUrl(process.env.ETH_RPC_URL, 'https://rpc.ankr.com/eth'),
+      ...rpc(process.env.ETH_RPC_URL, 'https://ethereum-rpc.publicnode.com'),
       chainId: 1,
       accounts: [
         process.env.DEPLOYER_WALLET_MAINNET_PRIVATE_KEY as string,
       ].filter(Boolean),
     },
     base: {
-      url: firstRpcUrl(process.env.BASE_RPC_URL, 'https://mainnet.base.org'),
+      ...rpc(process.env.BASE_RPC_URL, 'https://mainnet.base.org'),
       chainId: 8453,
       accounts: [
         process.env.DEPLOYER_WALLET_MAINNET_PRIVATE_KEY as string,
       ].filter(Boolean),
     },
     celo: {
-      url: firstRpcUrl(process.env.CELO_RPC_URL, 'https://forno.celo.org'),
+      ...rpc(process.env.CELO_RPC_URL, 'https://forno.celo.org'),
       chainId: 42220,
       accounts: [
         process.env.DEPLOYER_WALLET_MAINNET_PRIVATE_KEY as string,
       ].filter(Boolean),
     },
     polygon: {
-      url: firstRpcUrl(process.env.POLYGON_RPC_URL, 'https://polygon-rpc.com'),
+      ...rpc(
+        process.env.POLYGON_RPC_URL,
+        'https://polygon-bor-rpc.publicnode.com'
+      ),
       chainId: 137,
       accounts: [
         process.env.DEPLOYER_WALLET_MAINNET_PRIVATE_KEY as string,
       ].filter(Boolean),
     },
     bsc: {
-      url: firstRpcUrl(
-        process.env.BSC_RPC_URL,
-        'https://bsc-dataseed.binance.org',
-      ),
+      ...rpc(process.env.BSC_RPC_URL, 'https://bsc-dataseed.binance.org'),
       chainId: 56,
       accounts: [
         process.env.DEPLOYER_WALLET_MAINNET_PRIVATE_KEY as string,
