@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2026 Textile, Inc.
 // This smart contract is part of the Textile Protocol (Settlement v3).
 pragma solidity 0.8.30;

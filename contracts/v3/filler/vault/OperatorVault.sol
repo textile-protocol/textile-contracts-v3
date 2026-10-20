@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2026 Textile, Inc.
 pragma solidity 0.8.30;
 

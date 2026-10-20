@@ -3,7 +3,7 @@
   "version": "3.0.0",
   "private": false,
   "description": "Textile swap execution contracts for the filler network.",
-  "license": "BUSL-1.1",
+  "license": "GPL-2.0-or-later",
   "type": "commonjs",
   "scripts": {
     "compile": "hardhat --config hardhat.config.v3.ts compile",

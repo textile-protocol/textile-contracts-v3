@@ -151,7 +151,26 @@ regression tests and needs [Foundry](https://getfoundry.sh).
 
 ## License
 
-Textile-owned smart contracts are licensed under the Business Source License
-1.1. See [`licenses/BUSL_LICENSE`](licenses/BUSL_LICENSE). After the applicable
-Change Date, the contracts become available under MIT as described in the
-license terms.
+The swap contracts in this repository (`contracts/v3/filler/`, outside
+`vendor/`) are licensed under GPL-2.0-or-later, see
+[`LICENSE`](LICENSE). They compile in UniswapX code, which is GPL, so they
+can't carry a more restrictive license. Anyone can use, modify and deploy them,
+commercially too, as long as what they distribute stays under the GPL with its
+source available.
+
+The vendored code under `contracts/v3/filler/vendor/` is third-party and keeps
+its upstream license. Each dependency's license text sits next to it:
+
+| Code | License |
+| --- | --- |
+| UniswapX (`vendor/uniswapx/`) | GPL-2.0-or-later, [`LICENSE`](contracts/v3/filler/vendor/uniswapx/LICENSE) |
+| solmate (`vendor/solmate/`) | AGPL-3.0-only, [`LICENSE`](contracts/v3/filler/vendor/solmate/LICENSE) |
+| Permit2 interfaces (`vendor/permit2/`) | MIT, [`LICENSE`](contracts/v3/filler/vendor/permit2/LICENSE) |
+| forge-std (`lib/forge-std/`) | MIT or Apache-2.0 |
+
+The deployed `LimitOrderReactor` combines GPL and AGPL code, so it falls under
+AGPL-3.0. A few test-only mocks that never touch vendored code stay under the
+Business Source License 1.1, see [`licenses/BUSL_LICENSE`](licenses/BUSL_LICENSE);
+each file's SPDX header says which applies. OpenZeppelin Contracts is an
+MIT-licensed npm dependency. `test/v3/FillerReactor/LicenseBoundary.test.ts`
+fails if a BUSL file ever compiles in GPL or AGPL code.
