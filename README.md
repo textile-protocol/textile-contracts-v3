@@ -123,6 +123,23 @@ address on every chain, already in the table above.
 
 Source: [UniswapX deployment table](https://github.com/Uniswap/UniswapX#deployment-addresses).
 
+## Audits
+
+[Hashlock](https://hashlock.com) audited the Textile swap contracts in
+September 2026: `OperatorVault`, its factory, `VaultOrderExecutor`,
+`SellFirstFeeController`, `PreferredFillerValidation`, `FillerConstants`,
+`VaultDeployer`, `AaveV3YieldAdapter`, and the `VaultPolicy`, `VaultLib` and
+`VaultErrors` libraries. They found 3 Medium and 2 Low issues, all resolved.
+
+- Report: [`audits/Hashlock-Textile-Audit-Final-Report-v1.pdf`](audits/Hashlock-Textile-Audit-Final-Report-v1.pdf)
+- Audited commit: [`06d976ce013d24f97cea7b75e14d2ed68a37bf6f`](https://github.com/textile-protocol/textile-contracts-v3/tree/06d976ce013d24f97cea7b75e14d2ed68a37bf6f)
+- Fix review commit: [`8ea7aaa348112b629b2ce5d640571be8679a86f4`](https://github.com/textile-protocol/textile-contracts-v3/tree/8ea7aaa348112b629b2ce5d640571be8679a86f4),
+  tagged [`v1.0.0`](https://github.com/textile-protocol/textile-contracts-v3/releases/tag/v1.0.0)
+
+The fix review only checked the status of the findings. Commits after
+`8ea7aaa` change addresses, tests, build config and license headers, not
+contract logic.
+
 ## Upstream UniswapX Audits
 
 The upstream reports below are linked at the same `v2.1.0` source tag used for
